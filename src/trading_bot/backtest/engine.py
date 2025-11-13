@@ -1,13 +1,16 @@
 """Walk-forward backtesting utilities for streaming data."""
 from __future__ import annotations
 
+import math
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Iterable, Protocol, Sequence, TYPE_CHECKING
+from typing import Callable, Deque, Dict, Iterable, Optional, Protocol, Sequence, TYPE_CHECKING
 
 from loguru import logger
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from river import metrics as river_metrics
+    from trading_bot.features.engineer import OnlineFeatureBuilder
 
 
 class OnlineModel(Protocol):
@@ -28,6 +31,10 @@ class BacktestResult:
     hit_rate: float
     trades: int
     metric_summary: dict[str, float] = field(default_factory=dict)
+    total_return: float = 0.0
+    buy_hold_return: float = 0.0
+    sharpe_ratio: float = 0.0
+    total_costs: float = 0.0
 
 
 class BacktestEngine:
@@ -38,42 +45,182 @@ class BacktestEngine:
 
     def run(
         self,
-        stream: Iterable[tuple[dict, int]],
+        candles: Iterable[Dict[str, float]],
         *,
+        builder: "OnlineFeatureBuilder",
+        label_threshold: float,
+        prediction_horizon: int = 1,
+        aggregation: str = "majority",
+        signal_threshold: float = 0.5,
+        transaction_cost: float = 0.0,
+        slippage_cost: float = 0.0,
         metrics: Sequence["river_metrics.base.Metric"] | None = None,
+        step_callback: Optional[Callable[[], None]] = None,
     ) -> BacktestResult:
-        """Run the simulation over an `(features, label)` stream."""
+        """Run the simulation over a candle stream using buffered predictions."""
+
+        if prediction_horizon <= 0:
+            raise ValueError("prediction_horizon must be positive")
 
         trades = 0
         wins = 0
         equity = 0.0
+        returns_count = 0
+        returns_sum = 0.0
+        returns_sum_sq = 0.0
+        total_costs = 0.0
         metric_objects = list(metrics or [])
 
-        for features, label in stream:
-            prediction = self._model.predict_one(features)
-            if prediction is None:
-                self._model.learn_one(features, label)
-                continue
+        pending_features: dict[str, float] | None = None
+        pending_close: float | None = None
+        first_close: float | None = None
+        last_close: float | None = None
+        prediction_buffer: Deque[int] = deque(maxlen=prediction_horizon)
 
-            for metric in metric_objects:
-                metric.update(label, prediction)
+        for candle in candles:
+            features = builder.process(candle)
+            close = float(candle["close"])
 
-            if prediction != 0:
-                trades += 1
-                if prediction == label:
-                    wins += 1
-                    equity += 1
-                else:
-                    equity -= 1
+            if first_close is None:
+                first_close = close
 
-            self._model.learn_one(features, label)
+            if pending_features is not None and pending_close is not None:
+                raw_prediction = self._model.predict_one(pending_features)
+                prediction = self._normalize_prediction(raw_prediction)
+                prediction_buffer.append(prediction)
+
+                log_return = self._log_return(pending_close, close)
+                actual_label = self._label_from_log_return(log_return, label_threshold)
+
+                decision = 0
+                if len(prediction_buffer) == prediction_horizon:
+                    decision = self._aggregate_predictions(
+                        prediction_buffer,
+                        aggregation,
+                        signal_threshold,
+                    )
+
+                for metric in metric_objects:
+                    metric.update(actual_label, decision)
+
+                cost_penalty = 0.0
+                if decision != 0:
+                    cost_penalty = transaction_cost + slippage_cost
+                strategy_return = decision * log_return - cost_penalty
+                equity += strategy_return
+
+                returns_count += 1
+                returns_sum += strategy_return
+                returns_sum_sq += strategy_return * strategy_return
+
+                if decision != 0:
+                    trades += 1
+                    total_costs += cost_penalty
+                    if strategy_return > 0:
+                        wins += 1
+
+                if step_callback is not None:
+                    step_callback()
+
+                self._model.learn_one(pending_features, actual_label)
+
+            pending_features = features
+            pending_close = close
+            last_close = close
+
         hit_rate = wins / trades if trades else 0.0
 
         metric_summary = {metric.__class__.__name__: metric.get() for metric in metric_objects}
+        buy_hold_return = 0.0
+        if first_close is not None and last_close is not None and first_close > 0:
+            buy_hold_return = self._log_return(first_close, last_close)
+
+        sharpe_ratio = 0.0
+        if returns_count > 1:
+            mean_return = returns_sum / returns_count
+            variance = max((returns_sum_sq / returns_count) - mean_return * mean_return, 0.0)
+            std_dev = math.sqrt(variance)
+            if std_dev > 0:
+                minutes_per_year = 365 * 24 * 60
+                sharpe_ratio = (mean_return / std_dev) * math.sqrt(minutes_per_year)
+
         logger.info(
             "Completed backtest with equity=%s, trades=%s, hit_rate=%s",
             equity,
             trades,
             hit_rate,
         )
-        return BacktestResult(pnl=equity, hit_rate=hit_rate, trades=trades, metric_summary=metric_summary)
+        return BacktestResult(
+            pnl=equity,
+            hit_rate=hit_rate,
+            trades=trades,
+            metric_summary=metric_summary,
+            total_return=returns_sum,
+            buy_hold_return=buy_hold_return,
+            sharpe_ratio=sharpe_ratio,
+            total_costs=total_costs,
+        )
+
+    @staticmethod
+    def _normalize_prediction(raw_prediction) -> int:
+        if raw_prediction is None:
+            return 0
+        if raw_prediction > 0:
+            return 1
+        if raw_prediction < 0:
+            return -1
+        return 0
+
+    @staticmethod
+    def _aggregate_predictions(
+        predictions: Deque[int],
+        mode: str,
+        signal_threshold: float,
+    ) -> int:
+        mode = mode.lower()
+        window = len(predictions)
+        if window == 0:
+            return 0
+
+        threshold_votes = max(1, int(math.ceil(signal_threshold * window)))
+
+        if mode == "unanimous":
+            if window < threshold_votes:
+                return 0
+            positives = all(p == 1 for p in predictions)
+            negatives = all(p == -1 for p in predictions)
+            if positives:
+                return 1
+            if negatives:
+                return -1
+            return 0
+
+        if mode == "weighted":
+            weights = [idx + 1 for idx in range(window)]
+            weighted_score = sum(w * p for w, p in zip(weights, predictions))
+            max_score = sum(weights)
+            if abs(weighted_score) < signal_threshold * max_score:
+                return 0
+            return 1 if weighted_score > 0 else -1
+
+        # default majority logic
+        positives = sum(1 for p in predictions if p > 0)
+        negatives = sum(1 for p in predictions if p < 0)
+
+        if positives >= threshold_votes and positives > negatives:
+            return 1
+        if negatives >= threshold_votes and negatives > positives:
+            return -1
+        return 0
+
+    @staticmethod
+    def _log_return(previous_close: float, current_close: float) -> float:
+        return math.log(max(current_close, 1e-12) / max(previous_close, 1e-12))
+
+    @staticmethod
+    def _label_from_log_return(log_return: float, threshold: float) -> int:
+        if log_return > threshold:
+            return 1
+        if log_return < -threshold:
+            return -1
+        return 0
