@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-bot-v3"
+version = "0.1.0"
+description = "Adaptive crypto trading bot powered by online machine learning."
+readme = "README.md"
+authors = [{ name = "Your Name", email = "dev@example.com" }]
+requires-python = ">=3.10"
+keywords = ["trading", "crypto", "machine-learning", "river"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Financial and Insurance Industry",
+  "License :: OSI Approved :: MIT License"
+]
+dependencies = [
+  "river>=0.20.0",
+  "python-binance>=1.0.19",
+  "pandas>=2.1",
+  "numpy>=1.25",
+  "pyarrow>=13",
+  "requests>=2.31",
+  "pydantic>=2.4",
+  "pydantic-settings>=2.0",
+  "tenacity>=8.2",
+  "loguru>=0.7",
+  "typer>=0.9",
+  "rich>=13.6",
+  "tomli>=2.0; python_version < \"3.11\""
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4",
+  "pytest-asyncio>=0.21",
+  "pytest-cov>=4.1",
+  "mypy>=1.6",
+  "ruff>=0.1.5",
+  "black>=23.9"
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+trading_bot = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+select = ["E", "F", "I", "B", "UP", "N"]
+ignore = ["E203", "E266", "E501"]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_configs = true
+warn_return_any = true
+warn_unused_ignores = true
+strict_optional = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_no_return = true
+warn_unreachable = true
+allow_redefinition = false
+plugins = ["pydantic.mypy"]

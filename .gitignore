@@ -1,7 +1,5 @@
 ﻿# Byte-compiled / optimized / DLL files
-
 __pycache__/
-
 *.py[cod]
 *$py.class
 
@@ -28,132 +26,112 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyInstaller
-*.manifest
-*.spec
-
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
 
+# PyInstaller
+*.manifest
+*.spec
+
 # Unit test / coverage reports
-htmlcov/
 .tox/
 .nox/
+.pytest_cache/
+.hypothesis/
+htmlcov/
+coverage.xml
 .coverage
 .coverage.*
-.cache
-nosetests.xml
-coverage.xml
 *.cover
 *.py,cover
-.hypothesis/
-.pytest_cache/
 cover/
 
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-.python-version
-
-# pipenv
-Pipfile.lock
-
-# poetry
-poetry.lock
-
-# pdm
-.pdm.toml
-.pdm-python
-.pdm-build/
-
-# PEP 582
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
+# Type checking caches
+.mypy_cache/
+.pyre/
+.pytype/
+.dmypy.json
+dmypy.json
 
 # Environments
 .env
-.venv
+.env.*
+.venv/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
 
-# Spyder project settings
-.spyderproject
-.spyproject
+# Package managers
+Pipfile.lock
+poetry.lock
+.pdm.toml
+.pdm-python
+.pdm-build/
+.python-version
 
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# IDEs
+# IDE / editor
 .vscode/
 .idea/
+.spyderproject
+.spyproject
+.ropeproject
 *.swp
 *.swo
 *~
 .DS_Store
+Thumbs.db
 
-# Trading bot specific
+# Documentation
+docs/_build/
+/site
+
+# Jupyter / IPython
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# Logs & reports
+logs/
+*.log
+backtest_results/
+
+# Local configuration / secrets
 config/secrets.json
 config/api_keys.json
+config/settings.toml
+.envrc
+
+# Data artifacts
+data/raw/
+data/interim/
+data/processed/
+data/models/
+*.parquet
+*.feather
+*.csv
 *.db
 *.sqlite
-logs/
-data/historical/
-backtest_results/
-*.csv
-!example_config.csv
+*.h5
+!*/.gitkeep
+
+# Model artifacts
+*.pkl
+*.joblib
+*.onnx
+*.pt
+*.bin
+
+# Runtime caches
+__pypackages__/
+.scrapy
+instance/
+.webassets-cache
+.pybuilder/
+target/
+
+# OS / misc
+ehthumbs.db
+Icon?

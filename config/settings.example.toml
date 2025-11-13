@@ -1,0 +1,20 @@
+[binance]
+api_key = "your-api-key"
+api_secret = "your-secret-key"
+base_url = "https://api.binance.com"
+
+[data]
+symbol = "BTCUSDT"
+interval = "1m"
+start_date = "2018-01-01T00:00:00Z"
+fetch_chunk_minutes = 1000
+raw_data_dir = "data/raw/binance"
+
+[model]
+state_dir = "data/models"
+model_name = "river_adaptive_ensemble"
+
+[backtest]
+initial_equity = 100000.0
+fee_bps = 7.5
+slippage_bps = 5.0
