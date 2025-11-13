@@ -145,7 +145,7 @@ class BacktestEngine:
                 sharpe_ratio = (mean_return / std_dev) * math.sqrt(minutes_per_year)
 
         logger.info(
-            "Completed backtest with equity=%s, trades=%s, hit_rate=%s",
+            "Completed backtest with equity={:.6f}, trades={}, hit_rate={:.2%}",
             equity,
             trades,
             hit_rate,
