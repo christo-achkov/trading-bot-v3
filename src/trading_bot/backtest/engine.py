@@ -54,6 +54,8 @@ class BacktestEngine:
         signal_threshold: float = 0.85,
         transaction_cost: float = 0.0,
         slippage_cost: float = 0.0,
+        volatility_threshold: float | None = None,
+        trend_bias_threshold: float | None = None,
         metrics: Sequence["river_metrics.base.Metric"] | None = None,
         step_callback: Optional[Callable[[], None]] = None,
     ) -> BacktestResult:
@@ -99,6 +101,13 @@ class BacktestEngine:
                         aggregation,
                         signal_threshold,
                     )
+
+                decision = self._apply_risk_filters(
+                    decision,
+                    pending_features,
+                    volatility_threshold,
+                    trend_bias_threshold,
+                )
 
                 for metric in metric_objects:
                     metric.update(actual_label, decision)
@@ -170,6 +179,35 @@ class BacktestEngine:
         if raw_prediction < 0:
             return -1
         return 0
+
+    @staticmethod
+    def _apply_risk_filters(
+        decision: int,
+        features: dict[str, float] | None,
+        volatility_threshold: float | None,
+        trend_bias_threshold: float | None,
+    ) -> int:
+        """Apply simple volatility and trend-aware gating before acting."""
+
+        if decision == 0 or features is None:
+            return decision
+
+        volatility_regime = features.get("volatility_regime")
+        if (
+            volatility_threshold is not None
+            and volatility_regime is not None
+            and volatility_regime > volatility_threshold
+        ):
+            return 0
+
+        trend_bias = features.get("trend_bias")
+        if trend_bias_threshold is not None and trend_bias is not None:
+            if abs(trend_bias) < trend_bias_threshold:
+                return 0
+            if decision * trend_bias <= 0:
+                return 0
+
+        return decision
 
     @staticmethod
     def _aggregate_predictions(
