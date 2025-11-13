@@ -51,7 +51,7 @@ class BacktestEngine:
         label_threshold: float,
         prediction_horizon: int = 1,
         aggregation: str = "majority",
-        signal_threshold: float = 0.5,
+        signal_threshold: float = 0.85,
         transaction_cost: float = 0.0,
         slippage_cost: float = 0.0,
         metrics: Sequence["river_metrics.base.Metric"] | None = None,
@@ -182,13 +182,19 @@ class BacktestEngine:
         if window == 0:
             return 0
 
-        threshold_votes = max(1, int(math.ceil(signal_threshold * window)))
+        active_predictions = [p for p in predictions if p != 0]
+        active_count = len(active_predictions)
+
+        if active_count == 0:
+            return 0
+
+        threshold_votes = max(1, int(math.ceil(signal_threshold * active_count)))
 
         if mode == "unanimous":
-            if window < threshold_votes:
+            if active_count < threshold_votes:
                 return 0
-            positives = all(p == 1 for p in predictions)
-            negatives = all(p == -1 for p in predictions)
+            positives = all(p == 1 for p in active_predictions)
+            negatives = all(p == -1 for p in active_predictions)
             if positives:
                 return 1
             if negatives:
@@ -196,16 +202,25 @@ class BacktestEngine:
             return 0
 
         if mode == "weighted":
-            weights = [idx + 1 for idx in range(window)]
-            weighted_score = sum(w * p for w, p in zip(weights, predictions))
-            max_score = sum(weights)
-            if abs(weighted_score) < signal_threshold * max_score:
+            weighted_score = 0.0
+            active_weight = 0.0
+            for idx, vote in enumerate(predictions):
+                if vote == 0:
+                    continue
+                weight = float(idx + 1)
+                weighted_score += weight * vote
+                active_weight += weight
+
+            if active_weight == 0:
+                return 0
+
+            if abs(weighted_score) < signal_threshold * active_weight:
                 return 0
             return 1 if weighted_score > 0 else -1
 
         # default majority logic
-        positives = sum(1 for p in predictions if p > 0)
-        negatives = sum(1 for p in predictions if p < 0)
+        positives = sum(1 for p in active_predictions if p > 0)
+        negatives = sum(1 for p in active_predictions if p < 0)
 
         if positives >= threshold_votes and positives > negatives:
             return 1

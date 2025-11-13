@@ -34,11 +34,11 @@ def run(
     start: Optional[str] = typer.Option(None, help="Filter start timestamp (ISO8601)."),
     end: Optional[str] = typer.Option(None, help="Filter end timestamp (ISO8601)."),
     label_threshold: float = typer.Option(
-        0.001,
+        0.002,
         help="Log-return threshold for labeling; higher values reduce trade frequency.",
     ),
     prediction_horizon: int = typer.Option(
-        15,
+        20,
         min=1,
         help="Number of buffered predictions to aggregate before deciding on a trade.",
     ),
@@ -48,7 +48,7 @@ def run(
         case_sensitive=False,
     ),
     signal_threshold: float = typer.Option(
-        0.7,
+        0.85,
         min=0.0,
         max=1.0,
         help="Fraction of agreeing predictions required before entering a trade.",
