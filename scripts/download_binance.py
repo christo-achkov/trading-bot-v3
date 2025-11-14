@@ -21,6 +21,7 @@ def download(
     start: Optional[str] = typer.Option(None, help="Override start timestamp (ISO8601)."),
     end: Optional[str] = typer.Option(None, help="Override end timestamp (ISO8601)."),
     chunk_minutes: Optional[int] = typer.Option(None, help="Minutes per API request (<= 1000)."),
+    interval: Optional[str] = typer.Option(None, help="Override candle interval (e.g. 1h, 4h)."),
 ) -> None:
     """Download Binance candles and persist them as partitioned Parquet files."""
 
@@ -33,6 +34,7 @@ def download(
         typer.echo("Start timestamp must be before end timestamp.", err=True)
         raise typer.Exit(code=1)
 
+    download_interval = interval or settings.data.interval
     chunk = chunk_minutes or settings.data.fetch_chunk_minutes
     writer = ParquetBatchWriter(Path(settings.data.raw_data_dir))
 
@@ -44,7 +46,7 @@ def download(
         downloader = BinanceDownloader(
             client,
             symbol=settings.data.symbol,
-            interval=settings.data.interval,
+            interval=download_interval,
             chunk_minutes=chunk,
         )
 

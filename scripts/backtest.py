@@ -21,6 +21,7 @@ from trading_bot.backtest import BacktestEngine, BacktestResult
 from trading_bot.config import load_settings
 from trading_bot.data import count_candles_in_parquet, iter_candles_from_parquet
 from trading_bot.features import OnlineFeatureBuilder
+from trading_bot.features.scaler import OnlineFeatureScaler
 from trading_bot.models import adaptive_classifier, default_metrics
 from trading_bot.utils import parse_iso8601
 
@@ -57,6 +58,31 @@ def run(
         min=0.0,
         help="Per-trade slippage assumption in basis points.",
     ),
+    scale_features: bool = typer.Option(
+        False,
+        "--scale-features/--no-scale-features",
+        help="Standardize engineered features online before model updates.",
+    ),
+    signal_threshold: float = typer.Option(
+        0.85,
+        min=0.0,
+        max=1.0,
+        help="Fraction of active votes required to take a position.",
+    ),
+    aggregation: str = typer.Option(
+        "majority",
+        help="Prediction aggregation mode: majority, unanimous, or weighted.",
+    ),
+    stop_loss_pct: float = typer.Option(
+        0.0,
+        min=0.0,
+        help="Absolute stop-loss threshold as a simple return (e.g., 0.02 for 2%).",
+    ),
+    take_profit_pct: float = typer.Option(
+        0.0,
+        min=0.0,
+        help="Absolute take-profit threshold as a simple return (e.g., 0.05 for 5%).",
+    ),
 ) -> None:
     """Run a walk-forward backtest over stored Parquet candles."""
 
@@ -78,6 +104,18 @@ def run(
 
     transaction_cost = fee_bps / 10_000.0
     slippage_cost = slippage_bps / 10_000.0
+    feature_scaler = OnlineFeatureScaler() if scale_features else None
+
+    aggregation_mode = aggregation.lower()
+    if aggregation_mode not in {"majority", "unanimous", "weighted"}:
+        typer.echo(
+            "Unsupported aggregation mode. Choose from 'majority', 'unanimous', or 'weighted'.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    resolved_stop_loss = stop_loss_pct if stop_loss_pct > 0 else None
+    resolved_take_profit = take_profit_pct if take_profit_pct > 0 else None
 
     total_candles = count_candles_in_parquet(
         data_dir,
@@ -101,9 +139,6 @@ def run(
         )
         pretrain_candles = list(pretrain_source)
         pretrain_cache_count = len(pretrain_candles)
-
-    aggregation_mode = "majority"
-    signal_threshold = 0.85
 
     def run_once() -> BacktestResult:
         model = adaptive_classifier()
@@ -159,6 +194,9 @@ def run(
                     slippage_cost=slippage_cost,
                     metrics=[metric],
                     step_callback=on_step,
+                    feature_scaler=feature_scaler,
+                    stop_loss_pct=resolved_stop_loss,
+                    take_profit_pct=resolved_take_profit,
                 )
         return engine.run(
             candles_iter,
@@ -170,6 +208,9 @@ def run(
             transaction_cost=transaction_cost,
             slippage_cost=slippage_cost,
             metrics=[metric],
+            feature_scaler=feature_scaler,
+            stop_loss_pct=resolved_stop_loss,
+            take_profit_pct=resolved_take_profit,
         )
 
     result = run_once()
