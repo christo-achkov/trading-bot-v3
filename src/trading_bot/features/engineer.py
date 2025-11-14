@@ -126,19 +126,26 @@ class OnlineFeatureBuilder:
     return_fast: RollingMean = field(default_factory=lambda: RollingMean(5))
     return_medium: RollingMean = field(default_factory=lambda: RollingMean(30))
     return_slow: RollingMean = field(default_factory=lambda: RollingMean(120))
-    return_long: RollingMean = field(default_factory=lambda: RollingMean(240))
-    return_std: RollingStd = field(default_factory=lambda: RollingStd(120))
-    return_std_long: RollingStd = field(default_factory=lambda: RollingStd(240))
+    return_long: RollingMean = field(default_factory=lambda: RollingMean(360))
+    return_std_short: RollingStd = field(default_factory=lambda: RollingStd(30))
+    return_std_medium: RollingStd = field(default_factory=lambda: RollingStd(120))
+    return_std_long: RollingStd = field(default_factory=lambda: RollingStd(360))
     price_fast: RollingMean = field(default_factory=lambda: RollingMean(20))
-    price_slow: RollingMean = field(default_factory=lambda: RollingMean(60))
+    price_medium: RollingMean = field(default_factory=lambda: RollingMean(60))
+    price_slow: RollingMean = field(default_factory=lambda: RollingMean(180))
     price_std_fast: RollingStd = field(default_factory=lambda: RollingStd(20))
-    volume_mean: RollingMean = field(default_factory=lambda: RollingMean(60))
-    volume_std: RollingStd = field(default_factory=lambda: RollingStd(60))
+    volume_fast: RollingMean = field(default_factory=lambda: RollingMean(20))
+    volume_medium: RollingMean = field(default_factory=lambda: RollingMean(60))
+    volume_slow: RollingMean = field(default_factory=lambda: RollingMean(240))
+    volume_std_fast: RollingStd = field(default_factory=lambda: RollingStd(20))
+    volume_std_slow: RollingStd = field(default_factory=lambda: RollingStd(120))
     price_ema_fast: ExponentialMovingAverage = field(default_factory=lambda: ExponentialMovingAverage(12))
     price_ema_slow: ExponentialMovingAverage = field(default_factory=lambda: ExponentialMovingAverage(26))
     atr_tracker: AverageTrueRange = field(default_factory=lambda: AverageTrueRange(14))
     rsi_tracker: StreamingRSI = field(default_factory=lambda: StreamingRSI(14))
 
+    _close_history: Deque[float] = field(default_factory=lambda: deque(maxlen=720))
+    _volume_history: Deque[float] = field(default_factory=lambda: deque(maxlen=720))
     _prev_close: float | None = None
 
     def process(self, candle: Dict[str, float]) -> Dict[str, float]:
@@ -150,7 +157,6 @@ class OnlineFeatureBuilder:
         volume = float(candle.get("volume", 0.0))
 
         previous_close = self._prev_close
-
         if previous_close is None:
             minute_return = 0.0
         else:
@@ -160,7 +166,7 @@ class OnlineFeatureBuilder:
         ema_slow = self.price_ema_slow.update(close)
         ema_diff = ema_fast - ema_slow
         ema_ratio = 0.0
-        if ema_slow != 0:
+        if abs(ema_slow) > 1e-12:
             ema_ratio = (ema_fast / ema_slow) - 1.0
 
         rsi = self.rsi_tracker.update(close - previous_close if previous_close is not None else 0.0)
@@ -170,69 +176,134 @@ class OnlineFeatureBuilder:
         return_medium = self.return_medium.update(minute_return)
         return_slow = self.return_slow.update(minute_return)
         return_long = self.return_long.update(minute_return)
-        return_std = self.return_std.update(minute_return)
+        return_std_short = self.return_std_short.update(minute_return)
+        return_std_medium = self.return_std_medium.update(minute_return)
         return_std_long = self.return_std_long.update(minute_return)
 
         price_fast = self.price_fast.update(close)
+        price_medium = self.price_medium.update(close)
         price_slow = self.price_slow.update(close)
         price_std_fast = self.price_std_fast.update(close)
-        volume_mean = self.volume_mean.update(volume)
-        volume_std = self.volume_std.update(volume)
 
-        price_zscore = 0.0
+        volume_fast = self.volume_fast.update(volume)
+        volume_medium = self.volume_medium.update(volume)
+        volume_slow = self.volume_slow.update(volume)
+        volume_std_fast = self.volume_std_fast.update(volume)
+        volume_std_slow = self.volume_std_slow.update(volume)
+
+        price_zscore_fast = 0.0
         if price_std_fast > 0:
-            price_zscore = (close - price_fast) / price_std_fast
+            price_zscore_fast = (close - price_fast) / price_std_fast
 
         volume_ratio = 0.0
-        if volume_mean > 0:
-            volume_ratio = volume / volume_mean
+        if volume_medium > 1e-12:
+            volume_ratio = volume / volume_medium
 
-        volume_zscore = 0.0
-        if volume_std > 0:
-            volume_zscore = (volume - volume_mean) / volume_std
+        volume_zscore_fast = 0.0
+        if volume_std_fast > 0:
+            volume_zscore_fast = (volume - volume_fast) / volume_std_fast
 
-        regime_vol = return_std_long
+        volume_trend = 0.0
+        if volume_slow > 1e-12:
+            volume_trend = (volume_fast - volume_slow) / volume_slow
+
+        self._close_history.append(close)
+        self._volume_history.append(volume)
+
+        close_history = list(self._close_history)
+        volume_history = list(self._volume_history)
+
+        def _log_return_lag(steps: int) -> float:
+            if len(close_history) <= steps:
+                return 0.0
+            base = close_history[-steps - 1]
+            return math.log(max(close, 1e-12) / max(base, 1e-12))
+
+        return_lag_5 = _log_return_lag(5)
+        return_lag_15 = _log_return_lag(15)
+        return_lag_60 = _log_return_lag(60)
+        return_lag_240 = _log_return_lag(240)
+
+        def _donchian(window: int) -> tuple[float, float]:
+            if not close_history:
+                return close, close
+            window_data = close_history[-window:] if len(close_history) >= window else close_history
+            return max(window_data), min(window_data)
+
+        high_short, low_short = _donchian(60)
+        high_long, low_long = _donchian(240)
+
+        def _position(high_val: float, low_val: float) -> float:
+            span = max(high_val - low_val, 1e-12)
+            return (close - low_val) / span
+
+        donchian_pos_short = _position(high_short, low_short)
+        donchian_pos_long = _position(high_long, low_long)
+
+        def _volume_percentile(window: int) -> float:
+            if not volume_history:
+                return 0.0
+            window_data = volume_history[-window:] if len(volume_history) >= window else volume_history
+            below = sum(1 for v in window_data if v <= volume)
+            return below / len(window_data)
+
+        volume_percentile_short = _volume_percentile(60)
+        volume_percentile_long = _volume_percentile(240)
+
+        regime_volatility = return_std_long
         regime_sharpe = 0.0
-        if regime_vol > 1e-8:
-            regime_sharpe = (return_long / regime_vol) * math.sqrt(240)
+        if regime_volatility > 1e-8:
+            regime_sharpe = (return_long / regime_volatility) * math.sqrt(240)
 
         trend_bias = math.tanh(regime_sharpe / 2.0)
+
+        volatility_ratio = 0.0
+        if regime_volatility > 1e-12:
+            volatility_ratio = return_std_medium / max(regime_volatility, 1e-12)
 
         atr_pct = 0.0
         if close > 0:
             atr_pct = atr / close
 
+        range_abs = high - low
+        range_pct = range_abs / max(close, 1e-8)
+        ema_diff_pct = ema_diff / max(abs(price_slow), 1e-8)
+        range_vol_ratio = range_abs / max(return_std_short * close, 1e-8)
+
         feature_vector: Dict[str, float] = {
-            "close": close,
-            "high": high,
-            "low": low,
-            "volume": volume,
             "return_1m": minute_return,
             "return_fast": return_fast,
             "return_medium": return_medium,
             "return_slow": return_slow,
             "return_long": return_long,
-            "return_std": return_std,
+            "return_std_short": return_std_short,
+            "return_std_medium": return_std_medium,
             "return_std_long": return_std_long,
-            "momentum_diff_fast_slow": return_fast - return_slow,
-            "momentum_diff_medium_slow": return_medium - return_slow,
-            "price_fast_ma": price_fast,
-            "price_slow_ma": price_slow,
-            "price_zscore_fast": price_zscore,
+            "momentum_fast_slow": return_fast - return_slow,
+            "momentum_medium_slow": return_medium - return_slow,
+            "momentum_long_slow": return_long - return_slow,
+            "price_zscore_fast": price_zscore_fast,
             "volume_ratio": volume_ratio,
-            "range": high - low,
-            "range_pct": (high - low) / max(close, 1e-6),
-            "ema_fast": ema_fast,
-            "ema_slow": ema_slow,
-            "ema_diff": ema_diff,
+            "volume_trend": volume_trend,
+            "volume_zscore_fast": volume_zscore_fast,
+            "volume_percentile_short": volume_percentile_short,
+            "volume_percentile_long": volume_percentile_long,
+            "range_pct": range_pct,
+            "range_vol_ratio": range_vol_ratio,
             "ema_ratio": ema_ratio,
-            "atr": atr,
+            "ema_diff_pct": ema_diff_pct,
             "atr_pct": atr_pct,
             "rsi": rsi,
-            "volume_zscore": volume_zscore,
             "regime_sharpe": regime_sharpe,
             "trend_bias": trend_bias,
-            "volatility_regime": regime_vol,
+            "volatility_regime": regime_volatility,
+            "volatility_ratio": volatility_ratio,
+            "return_lag_5": return_lag_5,
+            "return_lag_15": return_lag_15,
+            "return_lag_60": return_lag_60,
+            "return_lag_240": return_lag_240,
+            "donchian_pos_short": donchian_pos_short,
+            "donchian_pos_long": donchian_pos_long,
         }
 
         self._prev_close = close

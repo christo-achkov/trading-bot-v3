@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from datetime import timedelta
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 import typer
 from rich.progress import (
@@ -16,12 +16,12 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
-
 from trading_bot.backtest import BacktestEngine, BacktestResult
 from trading_bot.config import load_settings
 from trading_bot.data import count_candles_in_parquet, iter_candles_from_parquet
 from trading_bot.features import OnlineFeatureBuilder
-from trading_bot.models import adaptive_classifier, default_metrics
+from trading_bot.models import adaptive_regressor, default_metrics, isotonic_calibrator
+from trading_bot.models.calibration import OnlineIsotonicCalibrator
 from trading_bot.utils import parse_iso8601
 
 app = typer.Typer(help="Backtesting utilities")
@@ -33,29 +33,72 @@ def run(
     interval: Optional[str] = typer.Option(None, help="Override interval."),
     start: Optional[str] = typer.Option(None, help="Filter start timestamp (ISO8601)."),
     end: Optional[str] = typer.Option(None, help="Filter end timestamp (ISO8601)."),
-    label_threshold: float = typer.Option(
-        0.002,
-        help="Log-return threshold for labeling; higher values reduce trade frequency.",
-    ),
-    prediction_horizon: int = typer.Option(
-        15,
-        min=1,
-        help="Number of buffered predictions to aggregate before deciding on a trade.",
+    edge_threshold: float = typer.Option(
+        0.001,
+        min=0.0,
+        help="Minimum forecast log-return required (after costs) to open a position.",
     ),
     pretrain_days: int = typer.Option(
-        0,
+        365,
         min=0,
         help="Days of history before the start window used for warm-up training.",
     ),
     fee_bps: float = typer.Option(
-        1.0,
+        7.5,
         min=0.0,
         help="Per-trade transaction cost in basis points.",
     ),
     slippage_bps: float = typer.Option(
-        1.0,
+        5.0,
         min=0.0,
         help="Per-trade slippage assumption in basis points.",
+    ),
+    edge_clip: Optional[float] = typer.Option(
+        None,
+        min=0.0,
+        help="Optional absolute cap applied to predicted edges before decision-making.",
+    ),
+    diagnostics_path: Optional[Path] = typer.Option(
+        None,
+        help="Persist predicted vs realised log returns to CSV for calibration analysis.",
+    ),
+    isotonic_calibration: bool = typer.Option(
+        True,
+        help="Apply an online isotonic calibrator to model outputs before decisions.",
+    ),
+    iso_window_size: int = typer.Option(
+        1024,
+        min=1,
+        help="Sliding window size used by the isotonic calibrator.",
+    ),
+    iso_min_samples: int = typer.Option(
+        50,
+        min=1,
+        help="Minimum observations required before calibration is applied.",
+    ),
+    optimizer: str = typer.Option(
+        "sgd",
+        help="Optimizer for the linear regressor (choices: adam, sgd, rmsprop).",
+    ),
+    learning_rate: float = typer.Option(
+        0.001,
+        min=1e-6,
+        help="Primary learning rate supplied to the optimizer.",
+    ),
+    intercept_learning_rate: float = typer.Option(
+        0.001,
+        min=0.0,
+        help="Learning rate applied to the intercept term.",
+    ),
+    l2: float = typer.Option(
+        1e-3,
+        min=0.0,
+        help="L2 regularisation strength for the regressor weights.",
+    ),
+    clip_gradient: float = typer.Option(
+        0.5,
+        min=0.0,
+        help="Absolute gradient clipping threshold for the regressor.",
     ),
 ) -> None:
     """Run a walk-forward backtest over stored Parquet candles."""
@@ -70,10 +113,6 @@ def run(
     data_dir = Path(settings.data.raw_data_dir)
     if not data_dir.exists():
         typer.echo(f"Data directory {data_dir} does not exist. Download data first.", err=True)
-        raise typer.Exit(code=1)
-
-    if prediction_horizon <= 0:
-        typer.echo("Prediction horizon must be a positive integer.", err=True)
         raise typer.Exit(code=1)
 
     transaction_cost = fee_bps / 10_000.0
@@ -102,13 +141,23 @@ def run(
         pretrain_candles = list(pretrain_source)
         pretrain_cache_count = len(pretrain_candles)
 
-    aggregation_mode = "majority"
-    signal_threshold = 0.85
+    diagnostics_buffer: List[Tuple[float, float]] | None = [] if diagnostics_path else None
 
     def run_once() -> BacktestResult:
-        model = adaptive_classifier()
+        model = adaptive_regressor(
+            optimizer_name=optimizer,
+            learning_rate=learning_rate,
+            intercept_lr=intercept_learning_rate,
+            l2=l2,
+            clip_gradient=clip_gradient,
+        )
+        calibrator = (
+            isotonic_calibrator(window_size=iso_window_size, min_samples=iso_min_samples)
+            if isotonic_calibration
+            else None
+        )
         metric = default_metrics()
-        engine = BacktestEngine(model)
+        engine = BacktestEngine(model, calibrator=calibrator)
         builder = OnlineFeatureBuilder()
 
         if pretrain_candles:
@@ -118,8 +167,8 @@ def run(
                     _warm_start_model(
                         pretrain_candles,
                         builder=builder,
-                        label_threshold=label_threshold,
                         model=model,
+                        calibrator=calibrator,
                         progress=pretrain_progress,
                         progress_task=task,
                     )
@@ -127,8 +176,8 @@ def run(
                 _warm_start_model(
                     pretrain_candles,
                     builder=builder,
-                    label_threshold=label_threshold,
                     model=model,
+                    calibrator=calibrator,
                     progress=None,
                     progress_task=None,
                 )
@@ -151,25 +200,23 @@ def run(
                 return engine.run(
                     candles_iter,
                     builder=builder,
-                    label_threshold=label_threshold,
-                    prediction_horizon=prediction_horizon,
-                    aggregation=aggregation_mode,
-                    signal_threshold=signal_threshold,
+                    edge_threshold=edge_threshold,
                     transaction_cost=transaction_cost,
                     slippage_cost=slippage_cost,
                     metrics=[metric],
                     step_callback=on_step,
+                    diagnostics=diagnostics_buffer,
+                    edge_clip=edge_clip,
                 )
         return engine.run(
             candles_iter,
             builder=builder,
-            label_threshold=label_threshold,
-            prediction_horizon=prediction_horizon,
-            aggregation=aggregation_mode,
-            signal_threshold=signal_threshold,
+            edge_threshold=edge_threshold,
             transaction_cost=transaction_cost,
             slippage_cost=slippage_cost,
             metrics=[metric],
+            diagnostics=diagnostics_buffer,
+            edge_clip=edge_clip,
         )
 
     result = run_once()
@@ -185,6 +232,13 @@ def run(
             metric=result.metric_summary,
         )
     )
+
+    if diagnostics_path and diagnostics_buffer is not None:
+        diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+        with diagnostics_path.open("w", encoding="utf-8") as handle:
+            handle.write("predicted_edge,realized_log_return\n")
+            for predicted, realized in diagnostics_buffer:
+                handle.write(f"{predicted},{realized}\n")
 
 
 def _progress(total: int) -> Progress:
@@ -204,8 +258,8 @@ def _warm_start_model(
     candles: Iterable[dict],
     *,
     builder: OnlineFeatureBuilder,
-    label_threshold: float,
     model,
+    calibrator: OnlineIsotonicCalibrator | None = None,
     progress: Progress | None = None,
     progress_task: int | None = None,
 ) -> None:
@@ -220,13 +274,11 @@ def _warm_start_model(
 
         if previous_features is not None and previous_close is not None:
             log_return = math.log(max(close, 1e-12) / max(previous_close, 1e-12))
-            if log_return > label_threshold:
-                label = 1
-            elif log_return < -label_threshold:
-                label = -1
-            else:
-                label = 0
-            model.learn_one(previous_features, label)
+            predicted_edge_raw = model.predict_one(previous_features)
+            predicted_edge = 0.0 if predicted_edge_raw is None else float(predicted_edge_raw)
+            if calibrator is not None:
+                calibrator.learn_one({"prediction": predicted_edge}, log_return)
+            model.learn_one(previous_features, log_return)
 
         previous_features = features
         previous_close = close

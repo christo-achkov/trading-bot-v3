@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import math
-from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, Deque, Dict, Iterable, Optional, Protocol, Sequence, TYPE_CHECKING
+from typing import Callable, Dict, Iterable, List, Optional, Protocol, Sequence, TYPE_CHECKING, Tuple
 
 from loguru import logger
 
@@ -15,6 +14,16 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
 
 class OnlineModel(Protocol):
     """Protocol describing the River estimator interface we rely on."""
+
+    def learn_one(self, x, y):
+        ...
+
+    def predict_one(self, x):
+        ...
+
+
+class OnlineCalibrator(Protocol):
+    """Protocol describing calibration models applied to raw predictions."""
 
     def learn_one(self, x, y):
         ...
@@ -40,29 +49,26 @@ class BacktestResult:
 class BacktestEngine:
     """Walk-forward simulator that updates the model per observation."""
 
-    def __init__(self, model: OnlineModel) -> None:
+    def __init__(self, model: OnlineModel, *, calibrator: OnlineCalibrator | None = None) -> None:
         self._model = model
+        self._calibrator = calibrator
 
     def run(
         self,
         candles: Iterable[Dict[str, float]],
         *,
         builder: "OnlineFeatureBuilder",
-        label_threshold: float,
-        prediction_horizon: int = 1,
-        aggregation: str = "majority",
-        signal_threshold: float = 0.85,
+        edge_threshold: float,
         transaction_cost: float = 0.0,
         slippage_cost: float = 0.0,
         volatility_threshold: float | None = None,
         trend_bias_threshold: float | None = None,
         metrics: Sequence["river_metrics.base.Metric"] | None = None,
         step_callback: Optional[Callable[[], None]] = None,
+        diagnostics: Optional[List[Tuple[float, float]]] = None,
+        edge_clip: float | None = None,
     ) -> BacktestResult:
-        """Run the simulation over a candle stream using buffered predictions."""
-
-        if prediction_horizon <= 0:
-            raise ValueError("prediction_horizon must be positive")
+        """Run the simulation over a candle stream using edge-based decisions."""
 
         trades = 0
         wins = 0
@@ -73,11 +79,12 @@ class BacktestEngine:
         total_costs = 0.0
         metric_objects = list(metrics or [])
 
-        pending_features: dict[str, float] | None = None
-        pending_close: float | None = None
+        previous_features: dict[str, float] | None = None
+        previous_close: float | None = None
         first_close: float | None = None
         last_close: float | None = None
-        prediction_buffer: Deque[int] = deque(maxlen=prediction_horizon)
+        trade_cost = max(transaction_cost, 0.0) + max(slippage_cost, 0.0)
+        threshold = max(edge_threshold, 0.0)
 
         for candle in candles:
             features = builder.process(candle)
@@ -86,35 +93,37 @@ class BacktestEngine:
             if first_close is None:
                 first_close = close
 
-            if pending_features is not None and pending_close is not None:
-                raw_prediction = self._model.predict_one(pending_features)
-                prediction = self._normalize_prediction(raw_prediction)
-                prediction_buffer.append(prediction)
+            if previous_features is not None and previous_close is not None:
+                predicted_edge_raw = self._model.predict_one(previous_features)
+                predicted_edge = 0.0 if predicted_edge_raw is None else float(predicted_edge_raw)
 
-                log_return = self._log_return(pending_close, close)
-                actual_label = self._label_from_log_return(log_return, label_threshold)
+                calibrator_features = None
+                if self._calibrator is not None:
+                    calibrator_features = {"prediction": predicted_edge}
+                    calibrated = self._calibrator.predict_one(calibrator_features)
+                    if calibrated is not None:
+                        predicted_edge = float(calibrated)
 
-                decision = 0
-                if len(prediction_buffer) == prediction_horizon:
-                    decision = self._aggregate_predictions(
-                        prediction_buffer,
-                        aggregation,
-                        signal_threshold,
-                    )
+                if edge_clip is not None and edge_clip > 0.0:
+                    predicted_edge = max(min(predicted_edge, edge_clip), -edge_clip)
 
+                log_return = self._log_return(previous_close, close)
+
+                decision = self._decision_from_edge(predicted_edge, threshold, trade_cost)
                 decision = self._apply_risk_filters(
                     decision,
-                    pending_features,
+                    previous_features,
                     volatility_threshold,
                     trend_bias_threshold,
                 )
 
                 for metric in metric_objects:
-                    metric.update(actual_label, decision)
+                    metric.update(log_return, predicted_edge)
 
-                cost_penalty = 0.0
-                if decision != 0:
-                    cost_penalty = transaction_cost + slippage_cost
+                if diagnostics is not None:
+                    diagnostics.append((predicted_edge, log_return))
+
+                cost_penalty = trade_cost if decision != 0 else 0.0
                 strategy_return = decision * log_return - cost_penalty
                 equity += strategy_return
 
@@ -131,10 +140,12 @@ class BacktestEngine:
                 if step_callback is not None:
                     step_callback()
 
-                self._model.learn_one(pending_features, actual_label)
+                self._model.learn_one(previous_features, log_return)
+                if self._calibrator is not None and calibrator_features is not None:
+                    self._calibrator.learn_one(calibrator_features, log_return)
 
-            pending_features = features
-            pending_close = close
+            previous_features = features
+            previous_close = close
             last_close = close
 
         hit_rate = wins / trades if trades else 0.0
@@ -171,14 +182,13 @@ class BacktestEngine:
         )
 
     @staticmethod
-    def _normalize_prediction(raw_prediction) -> int:
-        if raw_prediction is None:
+    def _decision_from_edge(predicted_edge: float, threshold: float, trading_cost: float) -> int:
+        """Map a predicted log return into a directional decision."""
+
+        cushion = threshold + trading_cost
+        if abs(predicted_edge) <= cushion:
             return 0
-        if raw_prediction > 0:
-            return 1
-        if raw_prediction < 0:
-            return -1
-        return 0
+        return 1 if predicted_edge > 0 else -1
 
     @staticmethod
     def _apply_risk_filters(
@@ -210,70 +220,5 @@ class BacktestEngine:
         return decision
 
     @staticmethod
-    def _aggregate_predictions(
-        predictions: Deque[int],
-        mode: str,
-        signal_threshold: float,
-    ) -> int:
-        mode = mode.lower()
-        window = len(predictions)
-        if window == 0:
-            return 0
-
-        active_predictions = [p for p in predictions if p != 0]
-        active_count = len(active_predictions)
-
-        if active_count == 0:
-            return 0
-
-        threshold_votes = max(1, int(math.ceil(signal_threshold * active_count)))
-
-        if mode == "unanimous":
-            if active_count < threshold_votes:
-                return 0
-            positives = all(p == 1 for p in active_predictions)
-            negatives = all(p == -1 for p in active_predictions)
-            if positives:
-                return 1
-            if negatives:
-                return -1
-            return 0
-
-        if mode == "weighted":
-            weighted_score = 0.0
-            active_weight = 0.0
-            for idx, vote in enumerate(predictions):
-                if vote == 0:
-                    continue
-                weight = float(idx + 1)
-                weighted_score += weight * vote
-                active_weight += weight
-
-            if active_weight == 0:
-                return 0
-
-            if abs(weighted_score) < signal_threshold * active_weight:
-                return 0
-            return 1 if weighted_score > 0 else -1
-
-        # default majority logic
-        positives = sum(1 for p in active_predictions if p > 0)
-        negatives = sum(1 for p in active_predictions if p < 0)
-
-        if positives >= threshold_votes and positives > negatives:
-            return 1
-        if negatives >= threshold_votes and negatives > positives:
-            return -1
-        return 0
-
-    @staticmethod
     def _log_return(previous_close: float, current_close: float) -> float:
         return math.log(max(current_close, 1e-12) / max(previous_close, 1e-12))
-
-    @staticmethod
-    def _label_from_log_return(log_return: float, threshold: float) -> int:
-        if log_return > threshold:
-            return 1
-        if log_return < -threshold:
-            return -1
-        return 0

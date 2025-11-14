@@ -38,7 +38,7 @@ class RunningMoment:
 class OnlineFeatureScaler:
     """Maintain per-feature standardization statistics on the fly."""
 
-    def __init__(self, epsilon: float = 1e-8) -> None:
+    def __init__(self, epsilon: float = 1e-4) -> None:
         self._epsilon = epsilon
         self._moments: Dict[str, RunningMoment] = {}
 
