@@ -8,7 +8,6 @@ symbol = "BTCUSDT"
 interval = "1m"
 start_date = "2018-01-01T00:00:00Z"
 fetch_chunk_minutes = 1000
-raw_data_dir = "data/raw/binance"
 
 [model]
 state_dir = "data/models"

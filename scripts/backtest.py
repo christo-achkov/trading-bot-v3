@@ -1,8 +1,8 @@
-"""CLI to run offline backtests using stored candle data."""
+"""CLI to run offline backtests using Binance REST data."""
 from __future__ import annotations
 
 import math
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
@@ -18,7 +18,8 @@ from rich.progress import (
 )
 from trading_bot.backtest import BacktestEngine, BacktestResult
 from trading_bot.config import load_settings
-from trading_bot.data import count_candles_in_parquet, iter_candles_from_parquet
+from trading_bot.data import BinanceRESTClient, fetch_candles, fetch_candles_iter
+from trading_bot.data.binance_downloader import INTERVAL_TO_TIMDELTA
 from trading_bot.features import OnlineFeatureBuilder
 from trading_bot.models import (
     adaptive_regressor,
@@ -218,184 +219,194 @@ def run(
         help="Subtract the estimated cost from training targets so the model learns net-of-cost returns (enable to train on net PnL).",
     ),
 ) -> None:
-    """Run a walk-forward backtest over stored Parquet candles."""
+    """Run a walk-forward backtest using Binance REST data."""
 
     settings = load_settings()
 
     resolved_symbol = symbol or settings.data.symbol
     resolved_interval = interval or settings.data.interval
-    start_dt = parse_iso8601(start) if start else None
-    end_dt = parse_iso8601(end) if end else None
 
-    data_dir = Path(settings.data.raw_data_dir)
-    if not data_dir.exists():
-        typer.echo(f"Data directory {data_dir} does not exist. Download data first.", err=True)
+    default_start = parse_iso8601(settings.data.start_date)
+    resolved_start = parse_iso8601(start) if start else default_start
+    resolved_end = parse_iso8601(end) if end else datetime.now(timezone.utc)
+
+    if resolved_start >= resolved_end:
+        typer.echo("Start time must be before end time.", err=True)
+        raise typer.Exit(code=1)
+
+    interval_delta = INTERVAL_TO_TIMDELTA.get(resolved_interval)
+    if interval_delta is None:
+        typer.echo(f"Unsupported interval: {resolved_interval}", err=True)
         raise typer.Exit(code=1)
 
     transaction_cost = fee_bps / 10_000.0
     slippage_cost = slippage_bps / 10_000.0
 
-    total_candles = count_candles_in_parquet(
-        data_dir,
-        symbol=resolved_symbol,
-        interval=resolved_interval,
-        start=start_dt,
-        end=end_dt,
-    )
-    total_samples = max(total_candles - 1, 0)
+    duration = resolved_end - resolved_start
+    estimated_candles = max(int(duration.total_seconds() / interval_delta.total_seconds()) + 1, 0)
+    total_samples = max(estimated_candles - 1, 0)
 
-    pretrain_candles: List[dict] | None = None
+    pretrain_candles: List[dict] = []
     pretrain_cache_count = 0
-    if pretrain_days > 0 and start_dt is not None:
-        pretrain_start = start_dt - timedelta(days=pretrain_days)
-        pretrain_source = iter_candles_from_parquet(
-            data_dir,
-            symbol=resolved_symbol,
-            interval=resolved_interval,
-            start=pretrain_start,
-            end=start_dt,
-        )
-        pretrain_candles = list(pretrain_source)
-        pretrain_cache_count = len(pretrain_candles)
+    pretrain_start = resolved_start - timedelta(days=pretrain_days) if pretrain_days > 0 else None
+
+    fetch_chunk = settings.data.fetch_chunk_minutes
 
     diagnostics_buffer: List[Tuple[float, float]] | None = [] if diagnostics_path else None
     trade_log: List[dict] | None = [] if trades_path else None
 
-    def run_once() -> BacktestResult:
-        model = adaptive_regressor(
-            optimizer_name=optimizer,
-            learning_rate=learning_rate,
-            intercept_lr=intercept_learning_rate,
-            l2=l2,
-            clip_gradient=clip_gradient,
-        )
-        calibrator = (
-            regime_isotonic_calibrator(
-                window_size=iso_window_size,
-                min_samples=iso_min_samples,
-                regime_feature="regime_label",
+    with BinanceRESTClient(
+        settings.binance.api_key,
+        settings.binance.api_secret,
+        base_url=settings.binance.base_url,
+    ) as client:
+        if pretrain_start is not None and pretrain_start < resolved_start:
+            pretrain_candles = fetch_candles(
+                client,
+                symbol=resolved_symbol,
+                interval=resolved_interval,
+                start=pretrain_start,
+                end=resolved_start,
+                chunk_minutes=fetch_chunk,
             )
-            if isotonic_calibration
-            else None
-        )
-        metric = default_metrics()
-        engine = BacktestEngine(model, calibrator=calibrator)
-        builder = OnlineFeatureBuilder()
+            pretrain_cache_count = len(pretrain_candles)
 
-        if pretrain_candles:
-            if pretrain_cache_count > 0:
-                with _progress(pretrain_cache_count) as pretrain_progress:
-                    task = pretrain_progress.add_task("Pretraining", total=pretrain_cache_count)
+        def run_once() -> BacktestResult:
+            model = adaptive_regressor(
+                optimizer_name=optimizer,
+                learning_rate=learning_rate,
+                intercept_lr=intercept_learning_rate,
+                l2=l2,
+                clip_gradient=clip_gradient,
+            )
+            calibrator = (
+                regime_isotonic_calibrator(
+                    window_size=iso_window_size,
+                    min_samples=iso_min_samples,
+                    regime_feature="regime_label",
+                )
+                if isotonic_calibration
+                else None
+            )
+            metric = default_metrics()
+            engine = BacktestEngine(model, calibrator=calibrator)
+            builder = OnlineFeatureBuilder()
+
+            if pretrain_candles:
+                if pretrain_cache_count > 0:
+                    with _progress(pretrain_cache_count) as pretrain_progress:
+                        task = pretrain_progress.add_task("Pretraining", total=pretrain_cache_count)
+                        _warm_start_model(
+                            pretrain_candles,
+                            builder=builder,
+                            model=model,
+                            calibrator=calibrator,
+                            progress=pretrain_progress,
+                            progress_task=task,
+                            trade_cost=transaction_cost + slippage_cost,
+                            cost_adjust_training=cost_adjust_training,
+                        )
+                else:
                     _warm_start_model(
                         pretrain_candles,
                         builder=builder,
                         model=model,
                         calibrator=calibrator,
-                        progress=pretrain_progress,
-                        progress_task=task,
+                        progress=None,
+                        progress_task=None,
                         trade_cost=transaction_cost + slippage_cost,
                         cost_adjust_training=cost_adjust_training,
                     )
-            else:
-                _warm_start_model(
-                    pretrain_candles,
-                    builder=builder,
-                    model=model,
-                    calibrator=calibrator,
-                    progress=None,
-                    progress_task=None,
-                    trade_cost=transaction_cost + slippage_cost,
-                    cost_adjust_training=cost_adjust_training,
-                )
 
-        candles_iter = iter_candles_from_parquet(
-            data_dir,
-            symbol=resolved_symbol,
-            interval=resolved_interval,
-            start=start_dt,
-            end=end_dt,
-        )
+            candles_iter = fetch_candles_iter(
+                client,
+                symbol=resolved_symbol,
+                interval=resolved_interval,
+                start=resolved_start,
+                end=resolved_end,
+                chunk_minutes=fetch_chunk,
+            )
 
-        if total_samples > 0:
-            with _progress(total_samples) as progress:
-                task_id = progress.add_task("Backtest", total=total_samples)
+            if total_samples > 0:
+                with _progress(total_samples) as progress:
+                    task_id = progress.add_task("Backtest", total=total_samples)
 
-                def on_step() -> None:
-                    progress.advance(task_id)
+                    def on_step() -> None:
+                        progress.advance(task_id)
 
-                return engine.run(
-                    candles_iter,
-                    builder=builder,
-                    edge_threshold=edge_threshold,
-                    transaction_cost=transaction_cost,
-                    slippage_cost=slippage_cost,
-                    metrics=[metric],
-                    step_callback=on_step,
-                    diagnostics=diagnostics_buffer,
-                    edge_clip=edge_clip,
-                    trade_log=trade_log,
-                    long_threshold=long_edge_threshold,
-                    short_threshold=short_edge_threshold,
-                    adaptive_threshold=adaptive_threshold,
-                    volatility_feature=volatility_feature,
-                    volatility_scale=volatility_scale,
-                    volatility_offset=volatility_offset,
-                    minimum_cushion=minimum_cushion,
-                    bull_cushion_offset=bull_cushion_offset,
-                    bear_cushion_offset=bear_cushion_offset,
-                    use_position_sizing=use_position_sizing,
-                    position_scale=position_scale,
-                    edge_scale=edge_scale,
-                    hysteresis=hysteresis,
-                    use_dynamic_cost=use_dynamic_cost,
-                    spread_cost_feature=spread_cost_feature,
-                    spread_cost_scale=spread_cost_scale,
-                    volatility_cost_feature=volatility_cost_feature,
-                    volatility_cost_scale=volatility_cost_scale,
-                    liquidity_cost_feature=liquidity_cost_feature,
-                    liquidity_cost_scale=liquidity_cost_scale,
-                    dynamic_cost_floor=dynamic_cost_floor,
-                    dynamic_cost_cap=dynamic_cost_cap,
-                    skip_low_edge_trades=skip_low_edge_trades,
-                    cost_adjust_training=cost_adjust_training,
-                )
-        return engine.run(
-            candles_iter,
-            builder=builder,
-            edge_threshold=edge_threshold,
-            transaction_cost=transaction_cost,
-            slippage_cost=slippage_cost,
-            metrics=[metric],
-            diagnostics=diagnostics_buffer,
-            edge_clip=edge_clip,
-            trade_log=trade_log,
-            long_threshold=long_edge_threshold,
-            short_threshold=short_edge_threshold,
-            adaptive_threshold=adaptive_threshold,
-            volatility_feature=volatility_feature,
-            volatility_scale=volatility_scale,
-            volatility_offset=volatility_offset,
-            minimum_cushion=minimum_cushion,
-            bull_cushion_offset=bull_cushion_offset,
-            bear_cushion_offset=bear_cushion_offset,
-            use_position_sizing=use_position_sizing,
-            position_scale=position_scale,
-            edge_scale=edge_scale,
-            hysteresis=hysteresis,
-            use_dynamic_cost=use_dynamic_cost,
-            spread_cost_feature=spread_cost_feature,
-            spread_cost_scale=spread_cost_scale,
-            volatility_cost_feature=volatility_cost_feature,
-            volatility_cost_scale=volatility_cost_scale,
-            liquidity_cost_feature=liquidity_cost_feature,
-            liquidity_cost_scale=liquidity_cost_scale,
-            dynamic_cost_floor=dynamic_cost_floor,
-            dynamic_cost_cap=dynamic_cost_cap,
-            skip_low_edge_trades=skip_low_edge_trades,
-            cost_adjust_training=cost_adjust_training,
-        )
+                    return engine.run(
+                        candles_iter,
+                        builder=builder,
+                        edge_threshold=edge_threshold,
+                        transaction_cost=transaction_cost,
+                        slippage_cost=slippage_cost,
+                        metrics=[metric],
+                        step_callback=on_step,
+                        diagnostics=diagnostics_buffer,
+                        edge_clip=edge_clip,
+                        trade_log=trade_log,
+                        long_threshold=long_edge_threshold,
+                        short_threshold=short_edge_threshold,
+                        adaptive_threshold=adaptive_threshold,
+                        volatility_feature=volatility_feature,
+                        volatility_scale=volatility_scale,
+                        volatility_offset=volatility_offset,
+                        minimum_cushion=minimum_cushion,
+                        bull_cushion_offset=bull_cushion_offset,
+                        bear_cushion_offset=bear_cushion_offset,
+                        use_position_sizing=use_position_sizing,
+                        position_scale=position_scale,
+                        edge_scale=edge_scale,
+                        hysteresis=hysteresis,
+                        use_dynamic_cost=use_dynamic_cost,
+                        spread_cost_feature=spread_cost_feature,
+                        spread_cost_scale=spread_cost_scale,
+                        volatility_cost_feature=volatility_cost_feature,
+                        volatility_cost_scale=volatility_cost_scale,
+                        liquidity_cost_feature=liquidity_cost_feature,
+                        liquidity_cost_scale=liquidity_cost_scale,
+                        dynamic_cost_floor=dynamic_cost_floor,
+                        dynamic_cost_cap=dynamic_cost_cap,
+                        skip_low_edge_trades=skip_low_edge_trades,
+                        cost_adjust_training=cost_adjust_training,
+                    )
+            return engine.run(
+                candles_iter,
+                builder=builder,
+                edge_threshold=edge_threshold,
+                transaction_cost=transaction_cost,
+                slippage_cost=slippage_cost,
+                metrics=[metric],
+                diagnostics=diagnostics_buffer,
+                edge_clip=edge_clip,
+                trade_log=trade_log,
+                long_threshold=long_edge_threshold,
+                short_threshold=short_edge_threshold,
+                adaptive_threshold=adaptive_threshold,
+                volatility_feature=volatility_feature,
+                volatility_scale=volatility_scale,
+                volatility_offset=volatility_offset,
+                minimum_cushion=minimum_cushion,
+                bull_cushion_offset=bull_cushion_offset,
+                bear_cushion_offset=bear_cushion_offset,
+                use_position_sizing=use_position_sizing,
+                position_scale=position_scale,
+                edge_scale=edge_scale,
+                hysteresis=hysteresis,
+                use_dynamic_cost=use_dynamic_cost,
+                spread_cost_feature=spread_cost_feature,
+                spread_cost_scale=spread_cost_scale,
+                volatility_cost_feature=volatility_cost_feature,
+                volatility_cost_scale=volatility_cost_scale,
+                liquidity_cost_feature=liquidity_cost_feature,
+                liquidity_cost_scale=liquidity_cost_scale,
+                dynamic_cost_floor=dynamic_cost_floor,
+                dynamic_cost_cap=dynamic_cost_cap,
+                skip_low_edge_trades=skip_low_edge_trades,
+                cost_adjust_training=cost_adjust_training,
+            )
 
-    result = run_once()
+        result = run_once()
     typer.echo(
         "trades={trades}, hit_rate={hit:.2%}, strat_return={sr:.2%}, buy_hold={bh:.2%}, "
         "sharpe={sh:.2f}, costs={costs:.2%}, metric={metric}".format(

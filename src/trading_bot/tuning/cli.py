@@ -9,7 +9,7 @@ import os
 import random
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from itertools import product
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Sequence, Tuple
@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from trading_bot.backtest import BacktestEngine
 from trading_bot.config import load_settings
-from trading_bot.data import iter_candles_from_parquet
+from trading_bot.data import BinanceRESTClient, fetch_candles
 from trading_bot.features import OnlineFeatureBuilder
 from trading_bot.models import adaptive_regressor, default_metrics, isotonic_calibrator
 from trading_bot.models.calibration import OnlineIsotonicCalibrator
@@ -414,35 +414,44 @@ def _aggregate_segments(segments: Sequence[SegmentSummary]) -> Dict[str, float]:
 
 def prepare_data(*, start: str | None, end: str | None, warmup_days: int) -> PreparedData:
     settings = load_settings()
-    data_dir = settings.data.raw_data_dir
     symbol = settings.data.symbol
     interval = settings.data.interval
 
-    start_dt = parse_iso8601(start) if start else parse_iso8601("2025-01-01T00:00:00Z")
-    end_dt = parse_iso8601(end) if end else None
-    pretrain_start = start_dt - timedelta(days=warmup_days)
+    default_start = parse_iso8601(settings.data.start_date)
+    start_dt = parse_iso8601(start) if start else default_start
+    end_dt = parse_iso8601(end) if end else datetime.now(timezone.utc)
+    pretrain_start = start_dt - timedelta(days=warmup_days) if warmup_days > 0 else None
 
     transaction_cost = settings.backtest.fee_bps / 10_000.0
     slippage_cost = settings.backtest.slippage_bps / 10_000.0
 
-    pretrain = list(
-        iter_candles_from_parquet(
-            data_dir,
-            symbol=symbol,
-            interval=interval,
-            start=pretrain_start,
-            end=start_dt,
-        )
-    )
-    backtest = list(
-        iter_candles_from_parquet(
-            data_dir,
+    chunk_minutes = settings.data.fetch_chunk_minutes
+
+    pretrain: List[dict] = []
+
+    with BinanceRESTClient(
+        settings.binance.api_key,
+        settings.binance.api_secret,
+        base_url=settings.binance.base_url,
+    ) as client:
+        if pretrain_start is not None and pretrain_start < start_dt:
+            pretrain = fetch_candles(
+                client,
+                symbol=symbol,
+                interval=interval,
+                start=pretrain_start,
+                end=start_dt,
+                chunk_minutes=chunk_minutes,
+            )
+
+        backtest = fetch_candles(
+            client,
             symbol=symbol,
             interval=interval,
             start=start_dt,
             end=end_dt,
+            chunk_minutes=chunk_minutes,
         )
-    )
 
     return PreparedData(
         pretrain_candles=pretrain,

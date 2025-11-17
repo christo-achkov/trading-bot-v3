@@ -28,7 +28,15 @@ class DataSettings(BaseModel):
     interval: str = Field("1m")
     start_date: str = Field(..., description="ISO8601 inclusive start timestamp")
     fetch_chunk_minutes: int = Field(1000, ge=1)
-    raw_data_dir: Path = Field(Path("data/raw/binance"))
+
+
+class LiveSettings(BaseModel):
+    """Live market data configuration."""
+
+    symbol: str = Field("BTCUSDT")
+    display_symbol: str = Field("BTC/USDT:USDT")
+    depth_levels: int = Field(50, ge=1)
+    candle_history: int = Field(2_000, ge=10, description="Number of candles to retain in memory")
 
 
 class ModelSettings(BaseModel):
@@ -57,6 +65,7 @@ class AppSettings(BaseSettings):
 
     binance: BinanceSettings
     data: DataSettings
+    live: LiveSettings = LiveSettings()
     model: ModelSettings = ModelSettings()
     backtest: BacktestSettings = BacktestSettings()
 

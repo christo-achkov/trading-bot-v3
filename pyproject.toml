@@ -30,6 +30,7 @@ dependencies = [
   "typer>=0.9",
   "rich>=13.6",
   "matplotlib>=3.8",
+  "websockets>=11.0",
   "tomli>=2.0; python_version < \"3.11\""
 ]
 

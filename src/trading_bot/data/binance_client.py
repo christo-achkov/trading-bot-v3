@@ -56,3 +56,8 @@ class BinanceRESTClient:
             endTime=endTime,
             limit=limit,
         )
+
+    def get_order_book(self, *, symbol: str, limit: int) -> Dict[str, Any]:
+        """Fetch a depth snapshot for the provided symbol."""
+
+        return self._client.get_order_book(symbol=symbol, limit=limit)  # type: ignore[no-any-return]
