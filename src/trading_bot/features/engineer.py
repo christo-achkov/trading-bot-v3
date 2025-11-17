@@ -124,108 +124,6 @@ class StreamingRSI:
         return 100.0 - (100.0 / (1.0 + rs))
 
 
-class OnlineHMM:
-    """Online HMM using recursive filtering to avoid lookahead bias.
-    
-    Updates state posteriors incrementally via forward-pass filtering only,
-    never peeking at future observations. Each observation refines beliefs
-    about the current hidden state based on emission likelihoods and 
-    transition dynamics from the previous posterior.
-    """
-
-    def __init__(
-        self,
-        n_states: int = 3,
-        *,
-        feature_keys: tuple[str, ...] = ("return_1m", "return_std_short"),
-        halflife: int = 240,
-    ) -> None:
-        if n_states < 2:
-            raise ValueError("n_states must be at least 2")
-        self.n_states = n_states
-        self.feature_keys = feature_keys
-        self._decay = math.exp(-math.log(2.0) / max(halflife, 1))
-        
-        # State posteriors (beliefs about current state)
-        self._state_probs = [1.0 / n_states] * n_states
-        
-        # Emission stats per state: running mean/std of observed features
-        self._emission_means = [[0.0] * len(feature_keys) for _ in range(n_states)]
-        self._emission_stds = [[1.0] * len(feature_keys) for _ in range(n_states)]
-        self._emission_counts = [0.0] * n_states
-        
-        # Transition matrix (uniform prior, will adapt online)
-        self._transitions = [[1.0 / n_states] * n_states for _ in range(n_states)]
-        self._transition_counts = [[1e-6] * n_states for _ in range(n_states)]
-
-    def update(self, features: Dict[str, float]) -> tuple[float, ...]:
-        """Compute next state posteriors given new observation.
-        
-        Returns current state probability vector (sums to 1.0).
-        Must be called BEFORE using the observation for training downstream,
-        ensuring no lookahead: posteriors reflect info up to t-1 plus current emission.
-        """
-        obs = tuple(features.get(k, 0.0) for k in self.feature_keys)
-        
-        # Step 1: Predict (prior) via transitions from previous posterior
-        predicted = [0.0] * self.n_states
-        for j in range(self.n_states):
-            for i in range(self.n_states):
-                predicted[j] += self._state_probs[i] * self._transitions[i][j]
-        
-        # Step 2: Emission likelihoods (Gaussian per state)
-        likelihoods = []
-        for s in range(self.n_states):
-            log_lik = 0.0
-            for idx, val in enumerate(obs):
-                mu = self._emission_means[s][idx]
-                sigma = max(self._emission_stds[s][idx], 1e-6)
-                z = (val - mu) / sigma
-                log_lik -= 0.5 * z * z + math.log(sigma * 2.506628)  # log(sqrt(2π))
-            likelihoods.append(math.exp(log_lik))
-        
-        # Step 3: Posterior (Bayes) = prior * likelihood, normalized
-        unnorm = [predicted[s] * likelihoods[s] for s in range(self.n_states)]
-        total = sum(unnorm) + 1e-12
-        posterior = [p / total for p in unnorm]
-        
-        # Step 4: Online learning of emission params (soft assignment)
-        for s in range(self.n_states):
-            weight = posterior[s]
-            self._emission_counts[s] = self._emission_counts[s] * self._decay + weight
-            
-            for idx, val in enumerate(obs):
-                old_mean = self._emission_means[s][idx]
-                alpha = weight / max(self._emission_counts[s], 1e-6)
-                new_mean = old_mean + alpha * (val - old_mean)
-                self._emission_means[s][idx] = new_mean
-                
-                # Running variance update (Welford-like)
-                delta = val - old_mean
-                delta2 = val - new_mean
-                old_var = self._emission_stds[s][idx] ** 2
-                new_var = old_var * self._decay + alpha * delta * delta2
-                self._emission_stds[s][idx] = math.sqrt(max(new_var, 1e-12))
-        
-        # Step 5: Update transition counts (previous state → current argmax)
-        prev_state = self._state_probs.index(max(self._state_probs))
-        curr_state = posterior.index(max(posterior))
-        for i in range(self.n_states):
-            for j in range(self.n_states):
-                self._transition_counts[i][j] *= self._decay
-        self._transition_counts[prev_state][curr_state] += 1.0
-        
-        # Normalize transition matrix
-        for i in range(self.n_states):
-            row_sum = sum(self._transition_counts[i]) + 1e-12
-            self._transitions[i] = [c / row_sum for c in self._transition_counts[i]]
-        
-        # Step 6: Store posterior for next iteration
-        self._state_probs = posterior
-        
-        return tuple(posterior)
-
-
 @dataclass
 class OnlineFeatureBuilder:
     """Construct derived features incrementally from streaming candles."""
@@ -259,13 +157,6 @@ class OnlineFeatureBuilder:
     funding_basis_mean_long: RollingMean = field(default_factory=lambda: RollingMean(720))
     regime_clusterer: object | None = field(
         default_factory=lambda: river_cluster.KMeans(n_clusters=3, halflife=512, seed=1337) if river_cluster else None
-    )
-    hmm_filter: OnlineHMM = field(
-        default_factory=lambda: OnlineHMM(
-            n_states=3,
-            feature_keys=("return_1m", "return_std_short", "volume_ratio"),
-            halflife=240,
-        )
     )
 
     _close_history: Deque[float] = field(default_factory=lambda: deque(maxlen=720))
@@ -662,17 +553,6 @@ class OnlineFeatureBuilder:
         regime_state_bull = 0.0
         regime_state_bear = 0.0
         regime_state_sideways = 0.0
-        
-        # Compute HMM state posteriors BEFORE updating (no lookahead)
-        hmm_state_probs = self.hmm_filter.update({
-            "return_1m": minute_return,
-            "return_std_short": return_std_short,
-            "volume_ratio": volume_ratio,
-        })
-        hmm_state_0 = hmm_state_probs[0]
-        hmm_state_1 = hmm_state_probs[1]
-        hmm_state_2 = hmm_state_probs[2]
-        hmm_argmax = hmm_state_probs.index(max(hmm_state_probs))
 
         cluster_inputs = {
             "volatility": max(regime_volatility, 0.0),
@@ -755,10 +635,6 @@ class OnlineFeatureBuilder:
             "regime_state_bull": regime_state_bull,
             "regime_state_bear": regime_state_bear,
             "regime_state_sideways": regime_state_sideways,
-            "hmm_state_0": hmm_state_0,
-            "hmm_state_1": hmm_state_1,
-            "hmm_state_2": hmm_state_2,
-            "hmm_argmax": float(hmm_argmax),
             "volatility_regime": regime_volatility,
             "volatility_ratio": volatility_ratio,
             "volatility_baseline": volatility_mean_long,
