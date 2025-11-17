@@ -10,6 +10,7 @@ import typer
 from trading_bot.config import load_settings
 from trading_bot.data.binance_client import BinanceRESTClient
 from trading_bot.data.binance_downloader import BinanceDownloader
+from trading_bot.data.microstructure import HeuristicMicrostructureProvider
 from trading_bot.data.storage import ParquetBatchWriter
 from trading_bot.utils import ensure_utc, parse_iso8601
 
@@ -21,6 +22,10 @@ def download(
     start: Optional[str] = typer.Option(None, help="Override start timestamp (ISO8601)."),
     end: Optional[str] = typer.Option(None, help="Override end timestamp (ISO8601)."),
     chunk_minutes: Optional[int] = typer.Option(None, help="Minutes per API request (<= 1000)."),
+    enrich_microstructure: bool = typer.Option(
+        True,
+        help="Generate heuristic microstructure snapshots when historical depth data is absent.",
+    ),
 ) -> None:
     """Download Binance candles and persist them as partitioned Parquet files."""
 
@@ -46,6 +51,7 @@ def download(
             symbol=settings.data.symbol,
             interval=settings.data.interval,
             chunk_minutes=chunk,
+            microstructure_provider=HeuristicMicrostructureProvider() if enrich_microstructure else None,
         )
 
         total = 0

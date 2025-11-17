@@ -20,7 +20,12 @@ from trading_bot.backtest import BacktestEngine, BacktestResult
 from trading_bot.config import load_settings
 from trading_bot.data import count_candles_in_parquet, iter_candles_from_parquet
 from trading_bot.features import OnlineFeatureBuilder
-from trading_bot.models import adaptive_regressor, default_metrics, isotonic_calibrator
+from trading_bot.models import (
+    adaptive_regressor,
+    default_metrics,
+    isotonic_calibrator,
+    regime_isotonic_calibrator,
+)
 from trading_bot.models.calibration import OnlineIsotonicCalibrator
 from trading_bot.utils import parse_iso8601
 
@@ -62,6 +67,10 @@ def run(
         None,
         help="Persist predicted vs realised log returns to CSV for calibration analysis.",
     ),
+    trades_path: Optional[Path] = typer.Option(
+        None,
+        help="Persist per-trade execution log including direction, fees, and equity.",
+    ),
     isotonic_calibration: bool = typer.Option(
         True,
         help="Apply an online isotonic calibrator to model outputs before decisions.",
@@ -99,6 +108,114 @@ def run(
         0.5,
         min=0.0,
         help="Absolute gradient clipping threshold for the regressor.",
+    ),
+    long_edge_threshold: Optional[float] = typer.Option(
+        None,
+        min=0.0,
+        help="Optional override for the long-entry edge threshold (defaults to edge_threshold).",
+    ),
+    short_edge_threshold: Optional[float] = typer.Option(
+        None,
+        min=0.0,
+        help="Optional override for the short-entry edge threshold (defaults to edge_threshold).",
+    ),
+    adaptive_threshold: bool = typer.Option(
+        False,
+        help="Scale entry cushions by a volatility feature before executing trades.",
+    ),
+    volatility_feature: str = typer.Option(
+        "volatility_regime",
+        help="Feature name used when adaptive thresholding is enabled.",
+    ),
+    volatility_scale: float = typer.Option(
+        0.0,
+        min=0.0,
+        help="Multiplier applied to the volatility feature when computing adaptive cushions.",
+    ),
+    volatility_offset: float = typer.Option(
+        0.0,
+        help="Baseline value subtracted from the volatility feature before scaling.",
+    ),
+    minimum_cushion: Optional[float] = typer.Option(
+        None,
+        min=0.0,
+        help="Optional minimum cushion (after costs) enforced when adaptive adjustments shrink thresholds.",
+    ),
+    bull_cushion_offset: float = typer.Option(
+        0.0,
+        help="Offset applied to the long cushion when trend bias is non-negative (positive values harden it).",
+    ),
+    bear_cushion_offset: float = typer.Option(
+        0.0,
+        help="Offset applied to the short cushion when trend bias is non-positive (positive values harden it).",
+    ),
+    use_position_sizing: bool = typer.Option(
+        False,
+        help="Size positions proportionally to the excess edge above the cushion.",
+    ),
+    position_scale: float = typer.Option(
+        1000.0,
+        min=0.0,
+        help="Scale translating excess edge into position size when sizing is enabled.",
+    ),
+    edge_scale: float = typer.Option(
+        1.0,
+        min=0.0,
+        help="Multiplier applied to predicted edges prior to thresholding.",
+    ),
+    hysteresis: float = typer.Option(
+        0.0,
+        min=0.0,
+        help="Gap that must be crossed before an existing position is closed (provides entry/exit hysteresis).",
+    ),
+    use_dynamic_cost: bool = typer.Option(
+        False,
+        help="Blend spread, volatility, and liquidity cues into per-trade cost estimates.",
+    ),
+    spread_cost_feature: str = typer.Option(
+        "micro_spread_bps",
+        help="Feature name feeding the spread contribution within dynamic cost estimation.",
+    ),
+    spread_cost_scale: float = typer.Option(
+        0.0,
+        min=0.0,
+        help="Scale applied to the spread feature when computing dynamic costs (in log-return units).",
+    ),
+    volatility_cost_feature: str = typer.Option(
+        "return_std_short",
+        help="Feature name feeding the volatility contribution within dynamic cost estimation.",
+    ),
+    volatility_cost_scale: float = typer.Option(
+        0.0,
+        min=0.0,
+        help="Scale applied to the volatility feature when computing dynamic costs.",
+    ),
+    liquidity_cost_feature: Optional[str] = typer.Option(
+        "liquidity_density_50bps",
+        help="Feature name reducing dynamic costs when liquidity is abundant (set to null to disable).",
+    ),
+    liquidity_cost_scale: float = typer.Option(
+        0.0,
+        min=0.0,
+        help="Scale applied to the liquidity feature (positive values reduce estimated costs).",
+    ),
+    dynamic_cost_floor: float = typer.Option(
+        0.0,
+        min=0.0,
+        help="Lower bound applied to dynamic cost estimates.",
+    ),
+    dynamic_cost_cap: Optional[float] = typer.Option(
+        None,
+        min=0.0,
+        help="Optional upper bound applied to dynamic cost estimates.",
+    ),
+    skip_low_edge_trades: bool = typer.Option(
+        True,
+        help="Skip signals whose predicted edge does not exceed the dynamic cost estimate.",
+    ),
+    cost_adjust_training: bool = typer.Option(
+        False,
+        help="Subtract the estimated cost from training targets so the model learns net-of-cost returns (enable to train on net PnL).",
     ),
 ) -> None:
     """Run a walk-forward backtest over stored Parquet candles."""
@@ -142,6 +259,7 @@ def run(
         pretrain_cache_count = len(pretrain_candles)
 
     diagnostics_buffer: List[Tuple[float, float]] | None = [] if diagnostics_path else None
+    trade_log: List[dict] | None = [] if trades_path else None
 
     def run_once() -> BacktestResult:
         model = adaptive_regressor(
@@ -152,7 +270,11 @@ def run(
             clip_gradient=clip_gradient,
         )
         calibrator = (
-            isotonic_calibrator(window_size=iso_window_size, min_samples=iso_min_samples)
+            regime_isotonic_calibrator(
+                window_size=iso_window_size,
+                min_samples=iso_min_samples,
+                regime_feature="regime_label",
+            )
             if isotonic_calibration
             else None
         )
@@ -171,6 +293,8 @@ def run(
                         calibrator=calibrator,
                         progress=pretrain_progress,
                         progress_task=task,
+                        trade_cost=transaction_cost + slippage_cost,
+                        cost_adjust_training=cost_adjust_training,
                     )
             else:
                 _warm_start_model(
@@ -180,6 +304,8 @@ def run(
                     calibrator=calibrator,
                     progress=None,
                     progress_task=None,
+                    trade_cost=transaction_cost + slippage_cost,
+                    cost_adjust_training=cost_adjust_training,
                 )
 
         candles_iter = iter_candles_from_parquet(
@@ -207,6 +333,31 @@ def run(
                     step_callback=on_step,
                     diagnostics=diagnostics_buffer,
                     edge_clip=edge_clip,
+                    trade_log=trade_log,
+                    long_threshold=long_edge_threshold,
+                    short_threshold=short_edge_threshold,
+                    adaptive_threshold=adaptive_threshold,
+                    volatility_feature=volatility_feature,
+                    volatility_scale=volatility_scale,
+                    volatility_offset=volatility_offset,
+                    minimum_cushion=minimum_cushion,
+                    bull_cushion_offset=bull_cushion_offset,
+                    bear_cushion_offset=bear_cushion_offset,
+                    use_position_sizing=use_position_sizing,
+                    position_scale=position_scale,
+                    edge_scale=edge_scale,
+                    hysteresis=hysteresis,
+                    use_dynamic_cost=use_dynamic_cost,
+                    spread_cost_feature=spread_cost_feature,
+                    spread_cost_scale=spread_cost_scale,
+                    volatility_cost_feature=volatility_cost_feature,
+                    volatility_cost_scale=volatility_cost_scale,
+                    liquidity_cost_feature=liquidity_cost_feature,
+                    liquidity_cost_scale=liquidity_cost_scale,
+                    dynamic_cost_floor=dynamic_cost_floor,
+                    dynamic_cost_cap=dynamic_cost_cap,
+                    skip_low_edge_trades=skip_low_edge_trades,
+                    cost_adjust_training=cost_adjust_training,
                 )
         return engine.run(
             candles_iter,
@@ -217,6 +368,31 @@ def run(
             metrics=[metric],
             diagnostics=diagnostics_buffer,
             edge_clip=edge_clip,
+            trade_log=trade_log,
+            long_threshold=long_edge_threshold,
+            short_threshold=short_edge_threshold,
+            adaptive_threshold=adaptive_threshold,
+            volatility_feature=volatility_feature,
+            volatility_scale=volatility_scale,
+            volatility_offset=volatility_offset,
+            minimum_cushion=minimum_cushion,
+            bull_cushion_offset=bull_cushion_offset,
+            bear_cushion_offset=bear_cushion_offset,
+            use_position_sizing=use_position_sizing,
+            position_scale=position_scale,
+            edge_scale=edge_scale,
+            hysteresis=hysteresis,
+            use_dynamic_cost=use_dynamic_cost,
+            spread_cost_feature=spread_cost_feature,
+            spread_cost_scale=spread_cost_scale,
+            volatility_cost_feature=volatility_cost_feature,
+            volatility_cost_scale=volatility_cost_scale,
+            liquidity_cost_feature=liquidity_cost_feature,
+            liquidity_cost_scale=liquidity_cost_scale,
+            dynamic_cost_floor=dynamic_cost_floor,
+            dynamic_cost_cap=dynamic_cost_cap,
+            skip_low_edge_trades=skip_low_edge_trades,
+            cost_adjust_training=cost_adjust_training,
         )
 
     result = run_once()
@@ -240,6 +416,50 @@ def run(
             for predicted, realized in diagnostics_buffer:
                 handle.write(f"{predicted},{realized}\n")
 
+    if trades_path and trade_log is not None:
+        trades_path.parent.mkdir(parents=True, exist_ok=True)
+        with trades_path.open("w", encoding="utf-8") as handle:
+            field_names = [
+                "trade_id",
+                "timestamp",
+                "side",
+                "predicted_edge",
+                "log_return",
+                "gross_return",
+                "fees",
+                "net_return",
+                "equity_after",
+                "position_size",
+                "long_cushion",
+                "short_cushion",
+                "cost_estimate",
+                "micro_spread_bps",
+                "microstructure_spread_available",
+                "volatility_regime",
+                "volatility_slope",
+                "regime_label",
+                "regime_state_bull",
+                "regime_state_bear",
+                "regime_state_sideways",
+                "funding_rate",
+                "funding_rate_diff",
+                "funding_available",
+                "orderbook_imbalance_top",
+                "liquidity_bid_depth_50bps",
+                "liquidity_ask_depth_50bps",
+                "liquidity_bid_depth_25bps",
+                "liquidity_ask_depth_25bps",
+                "liquidity_bid_depth_100bps",
+                "liquidity_ask_depth_100bps",
+                "liquidity_depth_25_available",
+                "liquidity_depth_50_available",
+                "liquidity_depth_100_available",
+            ]
+            handle.write(",".join(field_names) + "\n")
+            for entry in trade_log:
+                row = [str(entry.get(field, "")) for field in field_names]
+                handle.write(",".join(row) + "\n")
+
 
 def _progress(total: int) -> Progress:
     """Construct a configured Rich progress instance."""
@@ -262,6 +482,8 @@ def _warm_start_model(
     calibrator: OnlineIsotonicCalibrator | None = None,
     progress: Progress | None = None,
     progress_task: int | None = None,
+    trade_cost: float = 0.0,
+    cost_adjust_training: bool = True,
 ) -> None:
     """Prime the model with historical candles before evaluation begins."""
 
@@ -274,11 +496,12 @@ def _warm_start_model(
 
         if previous_features is not None and previous_close is not None:
             log_return = math.log(max(close, 1e-12) / max(previous_close, 1e-12))
+            net_return = log_return - trade_cost if cost_adjust_training else log_return
             predicted_edge_raw = model.predict_one(previous_features)
             predicted_edge = 0.0 if predicted_edge_raw is None else float(predicted_edge_raw)
             if calibrator is not None:
-                calibrator.learn_one({"prediction": predicted_edge}, log_return)
-            model.learn_one(previous_features, log_return)
+                calibrator.learn_one({"prediction": predicted_edge}, net_return)
+            model.learn_one(previous_features, net_return)
 
         previous_features = features
         previous_close = close

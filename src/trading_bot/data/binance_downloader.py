@@ -9,6 +9,7 @@ from loguru import logger
 from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 
 from trading_bot.utils import ensure_utc
+from trading_bot.data.microstructure import MicrostructureProvider
 
 MAX_CANDLES_PER_REQUEST = 1000
 
@@ -47,6 +48,7 @@ class BinanceDownloader:
 		symbol: str,
 		interval: str,
 		chunk_minutes: int,
+		microstructure_provider: MicrostructureProvider | None = None,
 	) -> None:
 		if interval not in INTERVAL_TO_TIMDELTA:
 			raise ValueError(f"Unsupported interval: {interval}")
@@ -69,6 +71,7 @@ class BinanceDownloader:
 		self._interval_delta = interval_delta
 		self._step = self._interval_delta * approximate_candles
 		self._limit = approximate_candles
+		self._microstructure_provider = microstructure_provider
 
 	@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=30))
 	def _fetch_page(self, start: datetime, end: datetime) -> List[list]:
@@ -85,7 +88,7 @@ class BinanceDownloader:
 	def _transform(self, raw: Sequence) -> dict:
 		"""Normalize raw kline payload into a structured dictionary."""
 
-		return {
+		record = {
 			"open_time": datetime.fromtimestamp(int(raw[0]) / 1000, tz=timezone.utc),
 			"open": float(raw[1]),
 			"high": float(raw[2]),
@@ -98,6 +101,21 @@ class BinanceDownloader:
 			"taker_buy_base_asset_volume": float(raw[9]),
 			"taker_buy_quote_asset_volume": float(raw[10]),
 		}
+
+		if self._microstructure_provider is not None:
+			try:
+				snapshot = self._microstructure_provider.snapshot_for(record)
+			except Exception as error:  # pragma: no cover - defensive fallback
+				logger.warning(
+					"Failed to build microstructure snapshot for {ts}: {error}",
+					ts=record["close_time"],
+					error=error,
+				)
+			else:
+				if snapshot is not None:
+					record.update(snapshot.to_record())
+
+		return record
 
 	def stream(self, *, start: datetime, end: datetime) -> Iterable[CandleBatch]:
 		"""Stream candle batches between two timestamps inclusive."""

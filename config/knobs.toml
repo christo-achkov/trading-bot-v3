@@ -1,0 +1,255 @@
+[metadata]
+version = 1
+
+[groups.thresholds]
+description = "Edge and volatility threshold tuning"
+
+[groups.calibration]
+description = "Isotonic calibrator controls"
+
+[groups.costs]
+description = "Dynamic cost and spread parameters"
+
+[groups.positioning]
+description = "Position sizing and edge shaping"
+
+[groups.model]
+description = "Online learner hyperparameters"
+
+[[knobs]]
+name = "edge_scale"
+group = "thresholds"
+type = "float"
+stage = "trading"
+default = 1.0
+grid = [0.9, 1.0, 1.1, 1.2]
+min = 0.8
+max = 1.3
+step = 0.01
+objective = "total_return"
+description = "Multiplier applied to the predicted edge before thresholds"
+
+[[knobs]]
+name = "volatility_scale"
+group = "thresholds"
+type = "float"
+stage = "trading"
+default = 0.06
+grid = [0.04, 0.06, 0.08, 0.1]
+min = 0.01
+max = 0.2
+step = 0.005
+objective = "total_return"
+description = "Sensitivity of adaptive thresholds to volatility feature"
+
+[[knobs]]
+name = "minimum_cushion"
+group = "thresholds"
+type = "float"
+stage = "trading"
+default = 0.0022
+grid = [0.0018, 0.0022, 0.0026, 0.0030]
+min = 0.001
+max = 0.0045
+step = 0.0001
+objective = "total_return"
+description = "Floor placed on edge cushions to avoid under-charging costs"
+
+[[knobs]]
+name = "hysteresis"
+group = "thresholds"
+type = "float"
+stage = "trading"
+default = 0.0003
+grid = [0.0, 0.0002, 0.0004, 0.0006]
+min = 0.0
+max = 0.0015
+step = 0.00005
+objective = "stability"
+description = "Hysteresis applied to entry/exit logic to avoid churn"
+
+[[knobs]]
+name = "use_calibrator"
+group = "calibration"
+type = "bool"
+stage = "training"
+default = true
+grid = [true, false]
+objective = "calibration"
+description = "Toggle isotonic calibration layer"
+
+[[knobs]]
+name = "iso_window_size"
+group = "calibration"
+type = "int"
+stage = "training"
+default = 1024
+grid = [896, 1024, 1280, 1536]
+min = 512
+max = 2048
+step = 128
+objective = "calibration"
+description = "Rolling window size for isotonic calibration"
+
+[[knobs]]
+name = "iso_min_samples"
+group = "calibration"
+type = "int"
+stage = "training"
+default = 160
+grid = [120, 160, 200, 260]
+min = 50
+max = 400
+step = 20
+objective = "calibration"
+description = "Minimum samples required before applying calibrator"
+
+[[knobs]]
+name = "liquidity_cost_scale"
+group = "costs"
+type = "float"
+stage = "trading"
+default = 0.0
+grid = [0.0, 0.05, 0.1, 0.15]
+min = 0.0
+max = 0.25
+step = 0.005
+objective = "cost_penalty"
+description = "Penalty multiplier for liquidity density feature"
+
+[[knobs]]
+name = "spread_cost_scale"
+group = "costs"
+type = "float"
+stage = "trading"
+default = 0.003
+grid = [0.0, 0.003, 0.005]
+min = 0.0
+max = 0.01
+step = 0.0005
+objective = "cost_penalty"
+description = "Scaling applied to micro spread estimate"
+
+[[knobs]]
+name = "volatility_cost_scale"
+group = "costs"
+type = "float"
+stage = "trading"
+default = 0.02
+grid = [0.0, 0.02, 0.04]
+min = 0.0
+max = 0.1
+step = 0.005
+objective = "cost_penalty"
+description = "Scaling for volatility based cost adjustments"
+
+[[knobs]]
+name = "dynamic_cost_floor"
+group = "costs"
+type = "float"
+stage = "trading"
+default = 0.0005
+grid = [0.0, 0.0005, 0.00075, 0.0010]
+min = 0.0
+max = 0.0015
+step = 0.00005
+objective = "cost_penalty"
+description = "Lower bound on dynamic trading cost estimates"
+
+[[knobs]]
+name = "position_scale"
+group = "positioning"
+type = "float"
+stage = "trading"
+default = 150.0
+grid = [100.0, 150.0, 200.0, 250.0]
+min = 50.0
+max = 300.0
+step = 5.0
+objective = "risk_adjusted_return"
+description = "Scaling factor for position sizing using the predicted edge"
+
+[[knobs]]
+name = "edge_clip"
+group = "positioning"
+type = "float"
+stage = "trading"
+default = 0.0
+grid = [0.0, 0.004, 0.006, 0.008]
+min = 0.0
+max = 0.01
+step = 0.0005
+objective = "stability"
+description = "Optional clipping bound applied to predicted edge"
+
+[[knobs]]
+name = "skip_low_edge_trades"
+group = "positioning"
+type = "bool"
+stage = "trading"
+default = true
+grid = [true, false]
+objective = "risk_adjusted_return"
+description = "Skip trades where predicted edge fails to cover estimated costs"
+
+[[knobs]]
+name = "use_position_sizing"
+group = "positioning"
+type = "bool"
+stage = "trading"
+default = true
+grid = [true, false]
+objective = "risk_adjusted_return"
+description = "Toggle proportional position sizing"
+
+[[knobs]]
+name = "learning_rate"
+group = "model"
+type = "float"
+stage = "training"
+default = 0.001
+grid = [0.0005, 0.0010, 0.0015, 0.0020]
+min = 0.0002
+max = 0.003
+step = 0.0001
+objective = "training_loss"
+description = "Learning rate for the adaptive regressor"
+
+[[knobs]]
+name = "intercept_lr"
+group = "model"
+type = "float"
+stage = "training"
+default = 0.001
+grid = [0.0005, 0.0010, 0.0015, 0.0020]
+min = 0.0002
+max = 0.003
+step = 0.0001
+objective = "training_loss"
+description = "Intercept learning rate used by the regressor"
+
+[[knobs]]
+name = "l2"
+group = "model"
+type = "float"
+stage = "training"
+default = 0.001
+grid = [0.0003, 0.0010, 0.0020, 0.0030]
+min = 0.0001
+max = 0.005
+step = 0.0001
+objective = "training_loss"
+description = "L2 regularisation factor"
+
+[[knobs]]
+name = "clip_gradient"
+group = "model"
+type = "float"
+stage = "training"
+default = 0.5
+grid = [0.25, 0.5, 0.75, 1.0]
+min = 0.1
+max = 1.5
+step = 0.05
+objective = "training_loss"
+description = "Gradient clipping threshold"

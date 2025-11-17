@@ -6,6 +6,8 @@ from bisect import bisect_left
 from collections import deque
 from typing import Deque, List, Tuple
 
+from trading_bot.models.regime import RegimeAwareWrapper
+
 
 class OnlineIsotonicCalibrator:
     """Approximate isotonic regression over a sliding window of predictions."""
@@ -131,5 +133,22 @@ def isotonic_calibrator(window_size: int = 1024, min_samples: int = 50) -> Onlin
 
     return OnlineIsotonicCalibrator(window_size=window_size, min_samples=min_samples)
 
+def regime_isotonic_calibrator(
+    window_size: int = 1024,
+    min_samples: int = 50,
+    *,
+    regime_feature: str = "regime_label",
+):
+    """Return a regime-aware calibrator that tracks separate isotonic maps per regime."""
 
-__all__ = ["OnlineIsotonicCalibrator", "isotonic_calibrator"]
+    def factory() -> OnlineIsotonicCalibrator:
+        return OnlineIsotonicCalibrator(window_size=window_size, min_samples=min_samples)
+
+    return RegimeAwareWrapper(factory, regime_feature=regime_feature, fallback_label=0)
+
+
+__all__ = [
+    "OnlineIsotonicCalibrator",
+    "isotonic_calibrator",
+    "regime_isotonic_calibrator",
+]

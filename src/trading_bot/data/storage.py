@@ -38,6 +38,31 @@ class ParquetBatchWriter:
         frame["month"] = frame["open_time"].dt.month.astype("int8")
         frame["day"] = frame["open_time"].dt.day.astype("int8")
 
+        def _normalise_levels(values):
+            if values is None:
+                return []
+            normalised = []
+            for entry in values:
+                if isinstance(entry, dict):
+                    price = entry.get("price") or entry.get("px") or entry.get("rate")
+                    size = entry.get("size") or entry.get("qty") or entry.get("volume") or entry.get("amount")
+                    if price is None or size is None:
+                        continue
+                    try:
+                        normalised.append([float(price), float(size)])
+                    except (TypeError, ValueError):
+                        continue
+                elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    try:
+                        normalised.append([float(entry[0]), float(entry[1])])
+                    except (TypeError, ValueError):
+                        continue
+            return normalised
+
+        for column in ("orderbook_bids", "orderbook_asks"):
+            if column in frame.columns:
+                frame[column] = frame[column].apply(_normalise_levels)
+
         table = pa.Table.from_pandas(frame, preserve_index=False)
         pq.write_to_dataset(
             table,

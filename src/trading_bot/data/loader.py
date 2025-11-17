@@ -24,6 +24,18 @@ CANDLE_COLUMNS = [
     "taker_buy_quote_asset_volume",
 ]
 
+MICROSTRUCTURE_COLUMNS = [
+    "best_bid",
+    "best_ask",
+    "best_bid_size",
+    "best_ask_size",
+    "orderbook_bids",
+    "orderbook_asks",
+    "microstructure_spread_bps",
+]
+
+PARTITION_COLUMNS = ["symbol", "interval", "year", "month", "day"]
+
 
 def iter_candles_from_parquet(
     root_dir: Path,
@@ -44,7 +56,17 @@ def iter_candles_from_parquet(
         end=end,
     )
 
-    scanner = dataset.scanner(columns=CANDLE_COLUMNS, filter=filter_expr, batch_size=batch_size)
+    available_columns = set(dataset.schema.names)
+    base_columns = [col for col in CANDLE_COLUMNS if col in available_columns]
+    microstructure_columns = [col for col in MICROSTRUCTURE_COLUMNS if col in available_columns]
+    partition_columns = [col for col in PARTITION_COLUMNS if col in available_columns]
+
+    requested_columns = base_columns
+    for column in microstructure_columns + partition_columns:
+        if column not in requested_columns:
+            requested_columns.append(column)
+
+    scanner = dataset.scanner(columns=requested_columns, filter=filter_expr, batch_size=batch_size)
 
     for batch in scanner.to_batches():
         frame = batch.to_pandas()
