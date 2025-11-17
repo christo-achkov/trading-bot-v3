@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import logging
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Iterable, List, Sequence
+from typing import Iterable, Sequence
 
 from trading_bot.data.binance_client import BinanceRESTClient
 from trading_bot.data.memory import Candle, CandleBuffer, OrderBookBuffer, OrderBookSnapshot
@@ -25,6 +26,8 @@ class _OrderBookState:
     _bids: dict[float, float] = field(init=False, default_factory=dict)
     _asks: dict[float, float] = field(init=False, default_factory=dict)
     _last_update_id: int | None = field(init=False, default=None)
+    _synced: bool = field(init=False, default=False)
+    _pending_updates: deque[OrderBookSnapshot] = field(init=False, default_factory=deque)
 
     def __post_init__(self) -> None:
         if self.depth_levels <= 0:
@@ -37,6 +40,8 @@ class _OrderBookState:
         self._bids.clear()
         self._asks.clear()
         self._last_update_id = None
+        self._synced = False
+        self._pending_updates.clear()
 
     def initialise(self, snapshot: dict) -> OrderBookSnapshot:
         """Seed the order book from a REST snapshot."""
@@ -61,6 +66,7 @@ class _OrderBookState:
         self._bids = _collect(bids)
         self._asks = _collect(asks)
         self._last_update_id = int(snapshot.get("lastUpdateId", 0) or 0)
+        self._synced = False
 
         return self._build_snapshot(
             first_id=self._last_update_id,
@@ -75,11 +81,15 @@ class _OrderBookState:
             return None
         if self._last_update_id is None:
             raise OrderBookSyncError("order book snapshot missing; cannot apply delta")
+
+        if not self._synced:
+            return self._buffer_until_synced(update)
+
         if update.last_update_id <= self._last_update_id:
             return None
 
         expected_next = self._last_update_id + 1
-        if update.first_update_id > expected_next:
+        if update.first_update_id is not None and update.first_update_id > expected_next:
             raise OrderBookSyncError(
                 f"gap detected (expected >= {expected_next}, received {update.first_update_id})"
             )
@@ -129,6 +139,83 @@ class _OrderBookState:
             bids=tuple(bids_sorted),
             asks=tuple(asks_sorted),
         )
+
+    def _buffer_until_synced(self, update: OrderBookSnapshot) -> OrderBookSnapshot | None:
+        expected = self._last_update_id + 1
+
+        if update.last_update_id is not None and update.last_update_id < self._last_update_id:
+            return None
+
+        self._pending_updates.append(update)
+
+        while self._pending_updates:
+            head = self._pending_updates[0]
+            if head.last_update_id is not None and head.last_update_id < expected:
+                self._pending_updates.popleft()
+                continue
+            break
+
+        handshake_index: int | None = None
+        for index, candidate in enumerate(self._pending_updates):
+            if candidate.first_update_id is None or candidate.last_update_id is None:
+                continue
+            if candidate.first_update_id <= expected <= candidate.last_update_id:
+                handshake_index = index
+                break
+
+        if handshake_index is None:
+            return None
+
+        delayed: list[OrderBookSnapshot] = []
+        for _ in range(handshake_index):
+            delayed.append(self._pending_updates.popleft())
+
+        self._synced = True
+
+        snapshot = self._consume_pending()
+
+        for item in delayed:
+            self._pending_updates.append(item)
+
+        additional_snapshot = self._consume_pending()
+        return additional_snapshot or snapshot
+
+    def _consume_pending(self) -> OrderBookSnapshot | None:
+        snapshot: OrderBookSnapshot | None = None
+
+        while self._pending_updates:
+            current = self._pending_updates[0]
+            if current.first_update_id is None or current.last_update_id is None:
+                self._pending_updates.popleft()
+                continue
+
+            if current.last_update_id <= self._last_update_id:
+                self._pending_updates.popleft()
+                continue
+
+            expected_next = self._last_update_id + 1 if self._last_update_id is not None else None
+            if expected_next is None:
+                break
+
+            if current.first_update_id is not None and current.first_update_id > expected_next:
+                break
+
+            if current.previous_update_id is not None and current.previous_update_id != self._last_update_id:
+                raise OrderBookSyncError(
+                    f"out-of-order update (prev {current.previous_update_id} != {self._last_update_id})"
+                )
+
+            self._apply_side(self._bids, current.bids)
+            self._apply_side(self._asks, current.asks)
+            self._last_update_id = current.last_update_id
+            snapshot = self._build_snapshot(
+                first_id=current.first_update_id,
+                last_id=self._last_update_id,
+                previous_id=current.previous_update_id,
+            )
+            self._pending_updates.popleft()
+
+        return snapshot
 
 
 class LiveMarketAggregator:
@@ -250,8 +337,8 @@ class LiveMarketAggregator:
 
         return record
 
-    def _serialise_levels(self, levels: Sequence[tuple[float, float]]) -> List[List[float]]:
-        serialised: List[List[float]] = []
+    def _serialise_levels(self, levels: Sequence[tuple[float, float]]) -> list[list[float]]:
+        serialised: list[list[float]] = []
         for price, qty in levels[: self._depth_levels]:
             serialised.append([float(price), float(qty)])
         return serialised

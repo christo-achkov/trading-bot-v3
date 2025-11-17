@@ -8,7 +8,16 @@ from typing import Protocol
 class ExchangeClient(Protocol):
     """Minimal interface for submitting orders to an exchange."""
 
-    def create_order(self, *, symbol: str, side: str, quantity: float, price: float | None = None) -> dict:
+    def create_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: float,
+        price: float | None = None,
+        order_type: str = "MARKET",
+        reduce_only: bool | None = None,
+    ) -> dict:
         ...
 
 
@@ -20,6 +29,8 @@ class OrderIntent:
     side: str
     quantity: float
     price: float | None = None
+    order_type: str = "MARKET"
+    reduce_only: bool = False
 
 
 class OrderRouter:
@@ -39,4 +50,6 @@ class OrderRouter:
             side=intent.side,
             quantity=intent.quantity,
             price=intent.price,
+            order_type=intent.order_type,
+            reduce_only=intent.reduce_only,
         )
