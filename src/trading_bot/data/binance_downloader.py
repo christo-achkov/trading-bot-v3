@@ -59,7 +59,7 @@ class BinanceDownloader:
 		approximate_candles = max(1, int((timedelta(minutes=requested_minutes)) / interval_delta))
 		if approximate_candles > MAX_CANDLES_PER_REQUEST:
 			logger.warning(
-				"chunk size reduced from %s candles to Binance limit %s",
+				"chunk size reduced from {} candles to Binance limit {}",
 				approximate_candles,
 				MAX_CANDLES_PER_REQUEST,
 			)
