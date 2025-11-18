@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, List
 
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TimeElapsedColumn
+
 from trading_bot.data import (
     BinanceFuturesStream,
     BinanceRESTClient,
@@ -119,28 +121,49 @@ class LiveMarketSession:
         previous_features: dict[str, float] | None = None
         previous_close: float | None = None
 
-        for record in candles:
-            features = self._builder.process(record)
-            close_price = float(record.get("close", 0.0))
+        total_steps = max(len(candles) - 1, 0)
+        progress: Progress | None = None
+        task_id = None
+        if total_steps > 0:
+            progress = Progress(
+                SpinnerColumn(),
+                "Pretraining",
+                BarColumn(),
+                MofNCompleteColumn(),
+                TimeElapsedColumn(),
+            )
+            progress.start()
+            task_id = progress.add_task("Pretraining", total=total_steps)
 
-            if previous_features is not None and previous_close is not None:
-                prediction_raw = self._model.predict_one(previous_features)
-                prediction = float(prediction_raw) if prediction_raw is not None else 0.0
-                calibrator_input = self._build_calibrator_input(previous_features, prediction)
-                if self._calibrator is not None:
-                    calibrated = self._calibrator.predict_one(calibrator_input)
-                    if calibrated is not None:
-                        prediction = float(calibrated)
+        try:
+            for record in candles:
+                features = self._builder.process(record)
+                close_price = float(record.get("close", 0.0))
 
-                log_return = self._log_return(previous_close, close_price)
-                target = log_return - self._trade_cost if self._cost_adjust else log_return
+                if previous_features is not None and previous_close is not None:
+                    prediction_raw = self._model.predict_one(previous_features)
+                    prediction = float(prediction_raw) if prediction_raw is not None else 0.0
+                    calibrator_input = self._build_calibrator_input(previous_features, prediction)
+                    if self._calibrator is not None:
+                        calibrated = self._calibrator.predict_one(calibrator_input)
+                        if calibrated is not None:
+                            prediction = float(calibrated)
 
-                self._model.learn_one(previous_features, target)
-                if self._calibrator is not None:
-                    self._calibrator.learn_one(calibrator_input, target)
+                    log_return = self._log_return(previous_close, close_price)
+                    target = log_return - self._trade_cost if self._cost_adjust else log_return
 
-            previous_features = features
-            previous_close = close_price
+                    self._model.learn_one(previous_features, target)
+                    if self._calibrator is not None:
+                        self._calibrator.learn_one(calibrator_input, target)
+
+                    if progress is not None and task_id is not None:
+                        progress.advance(task_id)
+
+                previous_features = features
+                previous_close = close_price
+        finally:
+            if progress is not None:
+                progress.stop()
 
         self._previous_features = previous_features
         self._previous_close = previous_close

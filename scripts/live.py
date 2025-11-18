@@ -151,7 +151,7 @@ async def _run_live(
 
     csv_handle = None
     csv_writer = None
-    cumulative_equity = 0.0
+    cumulative_log_equity = 0.0
     if signal_log is not None:
         signal_log.parent.mkdir(parents=True, exist_ok=True)
         csv_handle = signal_log.open("a", encoding="utf-8", newline="")
@@ -225,12 +225,13 @@ async def _run_live(
             )
 
             async def handle_signal(signal: LiveSignal) -> None:
-                nonlocal cumulative_equity
+                nonlocal cumulative_log_equity
                 await manager.handle_signal(signal)
                 if signal.training_target is not None and math.isfinite(signal.training_target):
-                    cumulative_equity += signal.training_target
+                    cumulative_log_equity += signal.training_target
 
                 if csv_writer is not None:
+                    cumulative_equity = math.expm1(cumulative_log_equity)
                     csv_writer.writerow(
                         [
                             signal.event_time.isoformat(),
@@ -248,13 +249,14 @@ async def _run_live(
                 log_realised = signal.realised_log_return if signal.realised_log_return is not None else float("nan")
                 log_target = signal.training_target if signal.training_target is not None else float("nan")
                 if print_equity:
+                    cumulative_equity = math.expm1(cumulative_log_equity)
                     logger.info(
-                        "edge=%.6f (raw=%.6f) realised=%.6f target=%.6f equity=%.6f",
+                        "edge=%.6f (raw=%.6f) realised=%.6f target=%.6f equity=%.3f%%",
                         signal.prediction,
                         signal.raw_prediction,
                         log_realised,
                         log_target,
-                        cumulative_equity,
+                        cumulative_equity * 100.0,
                     )
                 else:
                     logger.info(
