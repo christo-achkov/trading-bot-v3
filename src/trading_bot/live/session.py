@@ -8,7 +8,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, List
 
-from trading_bot.data import BinanceFuturesStream, BinanceRESTClient, LiveMarketAggregator, fetch_candles_iter
+from trading_bot.data import (
+    BinanceFuturesStream,
+    BinanceRESTClient,
+    LiveMarketAggregator,
+    ParquetRecorder,
+    fetch_candles_iter,
+)
 from trading_bot.data.binance_downloader import INTERVAL_TO_TIMDELTA
 from trading_bot.features import OnlineFeatureBuilder
 from trading_bot.models.regime import SupportsPredictLearn
@@ -51,6 +57,7 @@ class LiveMarketSession:
         trade_cost: float = 0.0,
         cost_adjust_training: bool = False,
         logger: logging.Logger | None = None,
+        recorder: ParquetRecorder | None = None,
     ) -> None:
         if interval not in INTERVAL_TO_TIMDELTA:
             raise ValueError(f"Unsupported interval: {interval}")
@@ -70,6 +77,7 @@ class LiveMarketSession:
         self._logger = logger or LOGGER
         self._previous_features: dict[str, float] | None = None
         self._previous_close: float | None = None
+        self._recorder = recorder
 
     async def run(self, callback: Callable[[LiveSignal], Awaitable[None] | None]) -> None:
         """Start streaming; invoke callback when a new signal is ready."""
@@ -87,6 +95,9 @@ class LiveMarketSession:
                 if record is None:
                     continue
 
+                if self._recorder is not None:
+                    self._recorder.append(record)
+
                 signal = self._handle_record(record)
                 if signal is None:
                     continue
@@ -94,6 +105,8 @@ class LiveMarketSession:
                 await self._invoke_callback(callback, signal)
         finally:
             await self._stream.stop()
+            if self._recorder is not None:
+                self._recorder.close()
 
     async def _warm_start(self) -> None:
         candles = await asyncio.to_thread(self._fetch_history)

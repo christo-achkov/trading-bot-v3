@@ -268,6 +268,8 @@ def run(
                 start=pretrain_start,
                 end=resolved_start,
                 chunk_minutes=fetch_chunk,
+                enriched_root=settings.data.enriched_root,
+                prefer_enriched=True,
             )
             pretrain_cache_count = len(pretrain_candles)
 
@@ -325,6 +327,8 @@ def run(
                 start=resolved_start,
                 end=resolved_end,
                 chunk_minutes=fetch_chunk,
+                enriched_root=settings.data.enriched_root,
+                prefer_enriched=True,
             )
 
             if total_samples > 0:

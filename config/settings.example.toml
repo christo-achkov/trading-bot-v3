@@ -8,6 +8,7 @@ symbol = "BTCUSDT"
 interval = "1m"
 start_date = "2018-01-01T00:00:00Z"
 fetch_chunk_minutes = 60000
+enriched_root = "data/processed/binance_enriched"
 
 [model]
 state_dir = "data/models"

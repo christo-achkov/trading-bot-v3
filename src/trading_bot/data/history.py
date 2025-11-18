@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Iterable, List, Sequence
 
 from trading_bot.data.binance_client import BinanceRESTClient
 from trading_bot.data.binance_downloader import BinanceDownloader, CandleBatch
+from trading_bot.data.enriched import has_enriched_coverage, iter_enriched_candles
+from trading_bot.utils import ensure_utc
 
 
 def fetch_candles(
@@ -16,8 +19,24 @@ def fetch_candles(
     start: datetime,
     end: datetime,
     chunk_minutes: int,
+    enriched_root: Path | None = None,
+    prefer_enriched: bool = False,
 ) -> List[dict]:
     """Retrieve candles between two timestamps (inclusive) in memory."""
+
+    if prefer_enriched and enriched_root is not None:
+        start_utc = ensure_utc(start)
+        end_utc = ensure_utc(end)
+        if has_enriched_coverage(enriched_root, symbol=symbol, interval=interval, start=start_utc, end=end_utc):
+            return list(
+                iter_enriched_candles(
+                    enriched_root,
+                    symbol=symbol,
+                    interval=interval,
+                    start=start_utc,
+                    end=end_utc,
+                )
+            )
 
     downloader = BinanceDownloader(
         client,
@@ -47,8 +66,23 @@ def fetch_candles_iter(
     start: datetime,
     end: datetime,
     chunk_minutes: int,
+    enriched_root: Path | None = None,
+    prefer_enriched: bool = False,
 ) -> Iterable[dict]:
     """Yield candles lazily using the Binance downloader."""
+
+    if prefer_enriched and enriched_root is not None:
+        start_utc = ensure_utc(start)
+        end_utc = ensure_utc(end)
+        if has_enriched_coverage(enriched_root, symbol=symbol, interval=interval, start=start_utc, end=end_utc):
+            yield from iter_enriched_candles(
+                enriched_root,
+                symbol=symbol,
+                interval=interval,
+                start=start_utc,
+                end=end_utc,
+            )
+            return
 
     downloader = BinanceDownloader(
         client,

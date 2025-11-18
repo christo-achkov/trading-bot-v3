@@ -7,6 +7,7 @@ Adaptive crypto trading bot built with online machine learning and production-gr
 - Feature generation with incremental statistics
 - Drift-aware machine learning models using the [River](https://github.com/online-ml/river) library
 - Walk-forward backtesting engine with execution simulation
+- Optional Parquet capture of live-enriched candles (price + order book)
 - Modular configuration and logging for production deployment
 
 ## Getting Started

@@ -134,6 +134,10 @@ class ThresholdPositionManager:
         if placed:
             self._last_order_at = datetime.now(timezone.utc)
         return placed
+
+    @property
+    def position_state(self) -> int:
+        return self._state
     async def _submit(self, *, side: str, quantity: float, reduce_only: bool) -> bool:
         if quantity <= 0:
             return False

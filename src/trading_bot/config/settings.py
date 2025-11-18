@@ -29,6 +29,10 @@ class DataSettings(BaseModel):
     interval: str = Field("1m")
     start_date: str = Field(..., description="ISO8601 inclusive start timestamp")
     fetch_chunk_minutes: int = Field(1000, ge=1)
+    enriched_root: Path | None = Field(
+        Path("data/processed/binance_enriched"),
+        description="Parquet store for enriched candle + order book data",
+    )
 
 
 class LiveSettings(BaseModel):
