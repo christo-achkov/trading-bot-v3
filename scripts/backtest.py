@@ -134,25 +134,25 @@ def run(
         help="Feature name used when adaptive thresholding is enabled.",
     ),
     volatility_scale: float = typer.Option(
-        0.0,
+        5.0,
         min=0.0,
         help="Multiplier applied to the volatility feature when computing adaptive cushions.",
     ),
     volatility_offset: float = typer.Option(
-        0.0,
+        0.002,
         help="Baseline value subtracted from the volatility feature before scaling.",
     ),
     minimum_cushion: Optional[float] = typer.Option(
-        None,
+        0.0003,
         min=0.0,
         help="Optional minimum cushion (after costs) enforced when adaptive adjustments shrink thresholds.",
     ),
     bull_cushion_offset: float = typer.Option(
-        0.0,
+        0.0001,
         help="Offset applied to the long cushion when trend bias is non-negative (positive values harden it).",
     ),
     bear_cushion_offset: float = typer.Option(
-        0.0,
+        0.0001,
         help="Offset applied to the short cushion when trend bias is non-positive (positive values harden it).",
     ),
     use_position_sizing: bool = typer.Option(

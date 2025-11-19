@@ -181,7 +181,8 @@ class BacktestEngine:
                     except (TypeError, ValueError):
                         vol_value = 0.0
                     if math.isfinite(vol_value):
-                        adjustment = (vol_value - volatility_offset) * volatility_scale
+                        vol_adjustment = (vol_value - volatility_offset) * volatility_scale
+                        adjustment = math.log(1 + vol_adjustment) if vol_adjustment > -1 else math.log(1e-10)
                         long_cushion += adjustment
                         short_cushion += adjustment
 
