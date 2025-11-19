@@ -146,21 +146,21 @@ class OnlineFeatureBuilder:
     volume_std_slow: RollingStd = field(default_factory=lambda: RollingStd(120))
     price_ema_fast: ExponentialMovingAverage = field(default_factory=lambda: ExponentialMovingAverage(12))
     price_ema_slow: ExponentialMovingAverage = field(default_factory=lambda: ExponentialMovingAverage(26))
-    atr_tracker: AverageTrueRange = field(default_factory=lambda: AverageTrueRange(14))
-    rsi_tracker: StreamingRSI = field(default_factory=lambda: StreamingRSI(14))
-    volatility_mean_long: RollingMean = field(default_factory=lambda: RollingMean(720))
-    volatility_std_tracker: RollingStd = field(default_factory=lambda: RollingStd(720))
+    atr_tracker: AverageTrueRange = field(default_factory=lambda: AverageTrueRange(5))
+    rsi_tracker: StreamingRSI = field(default_factory=lambda: StreamingRSI(5))
+    volatility_mean_long: RollingMean = field(default_factory=lambda: RollingMean(60))
+    volatility_std_tracker: RollingStd = field(default_factory=lambda: RollingStd(60))
     funding_mean_long: RollingMean = field(default_factory=lambda: RollingMean(720))
     funding_std_tracker: RollingStd = field(default_factory=lambda: RollingStd(720))
     funding_ema_fast: ExponentialMovingAverage = field(default_factory=lambda: ExponentialMovingAverage(48))
     funding_alt_mean_long: RollingMean = field(default_factory=lambda: RollingMean(720))
     funding_basis_mean_long: RollingMean = field(default_factory=lambda: RollingMean(720))
     regime_clusterer: object | None = field(
-        default_factory=lambda: river_cluster.KMeans(n_clusters=3, halflife=512, seed=1337) if river_cluster else None
+        default_factory=lambda: river_cluster.KMeans(n_clusters=4, halflife=256, seed=1337) if river_cluster else None
     )
 
-    _close_history: Deque[float] = field(default_factory=lambda: deque(maxlen=720))
-    _volume_history: Deque[float] = field(default_factory=lambda: deque(maxlen=720))
+    _close_history: Deque[float] = field(default_factory=lambda: deque(maxlen=60))
+    _volume_history: Deque[float] = field(default_factory=lambda: deque(maxlen=60))
     _funding_history: Deque[float] = field(default_factory=lambda: deque(maxlen=720))
     _prev_close: float | None = None
     _prev_funding_rate: float | None = None

@@ -40,22 +40,22 @@ def run(
     start: Optional[str] = typer.Option(None, help="Filter start timestamp (ISO8601)."),
     end: Optional[str] = typer.Option(None, help="Filter end timestamp (ISO8601)."),
     edge_threshold: float = typer.Option(
-        0.001,
+        0.0005,
         min=0.0,
         help="Minimum forecast log-return required (after costs) to open a position.",
     ),
     pretrain_days: int = typer.Option(
-        365,
+        7,
         min=0,
         help="Days of history before the start window used for warm-up training.",
     ),
     fee_bps: float = typer.Option(
-        7.5,
+        5.0,
         min=0.0,
         help="Per-trade transaction cost in basis points.",
     ),
     slippage_bps: float = typer.Option(
-        5.0,
+        3.0,
         min=0.0,
         help="Per-trade slippage assumption in basis points.",
     ),
@@ -101,9 +101,14 @@ def run(
         help="Learning rate applied to the intercept term.",
     ),
     l2: float = typer.Option(
-        1e-3,
+        1e-2,
         min=0.0,
         help="L2 regularisation strength for the regressor weights.",
+    ),
+    l1: float = typer.Option(
+        0.0,
+        min=0.0,
+        help="L1 regularisation strength for the regressor weights (encourages sparsity).",
     ),
     clip_gradient: float = typer.Option(
         0.5,
@@ -170,7 +175,7 @@ def run(
         help="Gap that must be crossed before an existing position is closed (provides entry/exit hysteresis).",
     ),
     use_dynamic_cost: bool = typer.Option(
-        False,
+        True,
         help="Blend spread, volatility, and liquidity cues into per-trade cost estimates.",
     ),
     spread_cost_feature: str = typer.Option(
@@ -215,7 +220,7 @@ def run(
         help="Skip signals whose predicted edge does not exceed the dynamic cost estimate.",
     ),
     cost_adjust_training: bool = typer.Option(
-        False,
+        True,
         help="Subtract the estimated cost from training targets so the model learns net-of-cost returns (enable to train on net PnL).",
     ),
 ) -> None:
@@ -279,6 +284,7 @@ def run(
                 learning_rate=learning_rate,
                 intercept_lr=intercept_learning_rate,
                 l2=l2,
+                l1=l1,
                 clip_gradient=clip_gradient,
             )
             calibrator = (

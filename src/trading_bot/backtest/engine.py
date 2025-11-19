@@ -171,8 +171,8 @@ class BacktestEngine:
                     cost_basis = cost_estimate
                     raw_training_target = log_return
 
-                long_cushion = long_threshold_value + cost_estimate
-                short_cushion = short_threshold_value + cost_estimate
+                long_cushion = long_threshold_value - math.log(1 - cost_estimate) if cost_estimate < 1 else long_threshold_value - math.log(1e-10)
+                short_cushion = short_threshold_value - math.log(1 - cost_estimate) if cost_estimate < 1 else short_threshold_value - math.log(1e-10)
 
                 if adaptive_threshold and volatility_scale > 0.0:
                     raw_vol = features.get(volatility_feature)
@@ -199,14 +199,14 @@ class BacktestEngine:
                     short_cushion += bear_cushion_offset
 
                 if minimum_cushion is not None:
-                    floor_value = max(minimum_cushion, cost_estimate)
+                    floor_value = max(minimum_cushion, -math.log(1 - cost_estimate) if cost_estimate < 1 else -math.log(1e-10))
                     long_cushion = max(long_cushion, floor_value)
                     short_cushion = max(short_cushion, floor_value)
 
-                long_cushion = max(long_cushion, cost_estimate)
-                short_cushion = max(short_cushion, cost_estimate)
+                long_cushion = max(long_cushion, -math.log(1 - cost_estimate) if cost_estimate < 1 else -math.log(1e-10))
+                short_cushion = max(short_cushion, -math.log(1 - cost_estimate) if cost_estimate < 1 else -math.log(1e-10))
 
-                should_skip = skip_low_edge_trades and abs(predicted_edge) <= cost_estimate
+                should_skip = skip_low_edge_trades and abs(predicted_edge) <= (-math.log(1 - cost_estimate) if cost_estimate < 1 else -math.log(1e-10))
                 if should_skip:
                     position = 0.0
                 else:
@@ -245,8 +245,9 @@ class BacktestEngine:
 
                 executed = position != 0.0
                 cost_penalty = cost_estimate * abs(position) if executed else 0.0
+                cost_penalty_log = abs(position) * math.log(1 - cost_estimate) if executed and cost_estimate < 1 else 0.0
                 gross_return = position * log_return
-                strategy_return = gross_return - cost_penalty
+                strategy_return = gross_return + cost_penalty_log
 
                 turnover_change = abs(position - current_position)
                 penalty = turnover_penalty * turnover_change if turnover_penalty > 0.0 else 0.0
@@ -294,7 +295,7 @@ class BacktestEngine:
                                 "predicted_edge": predicted_edge,
                                 "log_return": log_return,
                                 "gross_return": gross_return,
-                                "fees": cost_penalty,
+                                "fees": cost_penalty_log,
                                 "net_return": strategy_return,
                                 "equity_after": equity,
                                 "position_size": position,

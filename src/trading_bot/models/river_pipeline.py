@@ -17,6 +17,7 @@ def adaptive_regressor(
     learning_rate: float = 0.001,
     intercept_lr: float = 0.001,
     l2: float = 1e-3,
+    l1: float = 0.0,
     clip_gradient: float = 0.5,
     regime_aware: bool = True,
     ensemble_lr: float = 0.5,
@@ -33,6 +34,7 @@ def adaptive_regressor(
                 intercept_init=0.0,
                 intercept_lr=intercept_lr,
                 l2=l2,
+                l1=l1,
                 clip_gradient=clip_gradient,
             ),
         )

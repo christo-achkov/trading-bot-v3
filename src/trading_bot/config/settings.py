@@ -25,7 +25,7 @@ class BinanceSettings(BaseModel):
 class DataSettings(BaseModel):
     """Data acquisition configuration."""
 
-    symbol: str = Field("BTCUSDT")
+    symbol: str = Field("BTCUSDC")
     interval: str = Field("1m")
     start_date: str = Field(..., description="ISO8601 inclusive start timestamp")
     fetch_chunk_minutes: int = Field(1000, ge=1)
@@ -38,8 +38,8 @@ class DataSettings(BaseModel):
 class LiveSettings(BaseModel):
     """Live market data configuration."""
 
-    symbol: str = Field("BTCUSDT")
-    display_symbol: str = Field("BTC/USDT:USDT")
+    symbol: str = Field("BTCUSDC")
+    display_symbol: str = Field("BTC/USDC:USDC")
     depth_levels: int = Field(50, ge=1)
     candle_history: int = Field(2_000, ge=10, description="Number of candles to retain in memory")
     entry_edge: float = Field(0.0005, ge=0.0, description="Log-return edge required to enter a position")

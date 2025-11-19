@@ -4,7 +4,7 @@ api_secret = "your-secret-key"
 base_url = "https://api.binance.com"
 
 [data]
-symbol = "BTCUSDT"
+symbol = "BTCUSDC"
 interval = "1m"
 start_date = "2018-01-01T00:00:00Z"
 fetch_chunk_minutes = 60000
