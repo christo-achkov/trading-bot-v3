@@ -129,7 +129,7 @@ async def _run_live(
     )
     aggregator = LiveMarketAggregator(
         symbol=resolved_symbol,
-        candle_capacity=resolved_history,
+        candle_capacity=max(resolved_history, 100),
         depth_levels=resolved_depth,
         logger=logger,
     )

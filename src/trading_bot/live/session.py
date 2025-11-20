@@ -66,7 +66,7 @@ class LiveMarketSession:
         self._symbol = symbol
         self._interval = interval
         self._interval_delta = INTERVAL_TO_TIMDELTA[interval]
-        self._candle_history = max(int(candle_history), 1)
+        self._candle_history = max(int(candle_history), 0)
         self._fetch_chunk_minutes = max(int(fetch_chunk_minutes), 1)
         self._rest_client = rest_client
         self._stream = stream
@@ -244,7 +244,10 @@ class LiveMarketSession:
         if not fetched:
             return []
 
-        return fetched[-self._candle_history :]
+        if self._candle_history > 0:
+            return fetched[-self._candle_history :]
+        else:
+            return []
 
     def _build_calibrator_input(self, features: dict[str, float], prediction: float) -> dict[str, float]:
         input_payload = {"prediction": prediction}
