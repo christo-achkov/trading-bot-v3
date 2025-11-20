@@ -33,8 +33,8 @@ def run(
     candle_history: Optional[int] = typer.Option(None, help="Warm-up candles to fetch before streaming."),
     depth_levels: Optional[int] = typer.Option(None, help="Depth levels captured from the order book."),
     position_size: Optional[float] = typer.Option(None, min=0.0, help="Override base-asset position size."),
-    entry_edge: Optional[float] = typer.Option(None, min=0.0, help="Override entry edge threshold (log-return)."),
-    exit_edge: Optional[float] = typer.Option(None, min=0.0, help="Override exit edge threshold (log-return)."),
+    entry_edge: Optional[float] = typer.Option(None, min=0.0, help="Override entry edge threshold (percent-return)."),
+    exit_edge: Optional[float] = typer.Option(None, min=0.0, help="Override exit edge threshold (percent-return)."),
     cooldown_seconds: Optional[float] = typer.Option(None, min=0.0, help="Override minimum seconds between orders."),
     cost_adjust_training: bool = typer.Option(
         True,
@@ -151,7 +151,7 @@ async def _run_live(
 
     csv_handle = None
     csv_writer = None
-    cumulative_log_equity = 0.0
+    cumulative_equity = 0.0
     if signal_log is not None:
         signal_log.parent.mkdir(parents=True, exist_ok=True)
         csv_handle = signal_log.open("a", encoding="utf-8", newline="")
@@ -165,7 +165,7 @@ async def _run_live(
                     "close_time",
                     "prediction",
                     "raw_prediction",
-                    "realised_log_return",
+                    "realised_return",
                     "training_target",
                     "position_state",
                     "cumulative_equity",
@@ -225,14 +225,14 @@ async def _run_live(
             )
 
             async def handle_signal(signal: LiveSignal) -> None:
-                nonlocal cumulative_log_equity
+                nonlocal cumulative_equity
                 old_state = manager.position_state
                 await manager.handle_signal(signal)
                 new_state = manager.position_state
                 traded = old_state != new_state
                 cost = trade_cost if traded and cost_adjust_training else 0.0
-                if signal.realised_log_return is not None:
-                    signal.realised_log_return *= old_state
+                if signal.realised_return is not None:
+                    signal.realised_return *= old_state
 
                 # compute the display/trading target from the model prediction and position
                 display_target: float | None = None
@@ -243,21 +243,21 @@ async def _run_live(
                         display_target = None
 
                 # accumulate REALISED P&L for rolling equity (position-adjusted)
-                if signal.realised_log_return is not None and math.isfinite(signal.realised_log_return):
-                    cumulative_log_equity += signal.realised_log_return
+                if signal.realised_return is not None and math.isfinite(signal.realised_return):
+                    cumulative_equity += signal.realised_return
                 if traded:
                     # subtract per-trade fee once on position change
-                    cumulative_log_equity -= trade_cost
+                    cumulative_equity -= trade_cost
 
                 if csv_writer is not None:
-                    cumulative_equity = math.expm1(cumulative_log_equity)
+                    cumulative_equity_display = cumulative_equity
                     csv_writer.writerow(
                         [
                             signal.event_time.isoformat(),
                             signal.close_time.isoformat() if isinstance(signal.close_time, datetime) else signal.close_time,
                             signal.prediction,
                             signal.raw_prediction,
-                            signal.realised_log_return,
+                            signal.realised_return,
                             display_target,
                             manager.position_state,
                             cumulative_equity,
@@ -265,15 +265,14 @@ async def _run_live(
                     )
                     csv_handle.flush()
 
-                log_realised = signal.realised_log_return if signal.realised_log_return is not None else float("nan")
+                realised_display = signal.realised_return if signal.realised_return is not None else float("nan")
                 log_target = display_target if display_target is not None else float("nan")
                 if print_equity:
-                    cumulative_equity = math.expm1(cumulative_log_equity)
                     logger.info(
                         "edge=%.6f (raw=%.6f) realised=%.6f target=%.6f equity=%.3f%%",
                         signal.prediction,
                         signal.raw_prediction,
-                        log_realised,
+                        realised_display,
                         log_target,
                         cumulative_equity * 100.0,
                     )
@@ -282,7 +281,7 @@ async def _run_live(
                         "edge=%.6f (raw=%.6f) realised=%.6f target=%.6f",
                         signal.prediction,
                         signal.raw_prediction,
-                        log_realised,
+                        realised_display,
                         log_target,
                     )
 

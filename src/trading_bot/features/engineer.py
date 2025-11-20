@@ -503,7 +503,7 @@ class OnlineFeatureBuilder:
         if previous_close is None:
             minute_return = 0.0
         else:
-            minute_return = math.log(max(close, 1e-12) / max(previous_close, 1e-12))
+            minute_return = (close / max(previous_close, 1e-12)) - 1.0
 
         ema_fast = self.price_ema_fast.update(close)
         ema_slow = self.price_ema_slow.update(close)
@@ -661,16 +661,16 @@ class OnlineFeatureBuilder:
         close_history = list(self._close_history)
         volume_history = list(self._volume_history)
 
-        def _log_return_lag(steps: int) -> float:
+        def _pct_return_lag(steps: int) -> float:
             if len(close_history) <= steps:
                 return 0.0
             base = close_history[-steps - 1]
-            return math.log(max(close, 1e-12) / max(base, 1e-12))
+            return (close / max(base, 1e-12)) - 1.0
 
-        return_lag_5 = _log_return_lag(5)
-        return_lag_15 = _log_return_lag(15)
-        return_lag_60 = _log_return_lag(60)
-        return_lag_240 = _log_return_lag(240)
+        return_lag_5 = _pct_return_lag(5)
+        return_lag_15 = _pct_return_lag(15)
+        return_lag_60 = _pct_return_lag(60)
+        return_lag_240 = _pct_return_lag(240)
 
         def _donchian(window: int) -> tuple[float, float]:
             if not close_history:
@@ -875,11 +875,29 @@ class OnlineFeatureBuilder:
             "funding_rate_basis_diff_mean": funding_basis_diff_mean,
         }
 
-        # instantiate normalizer lazily
+        # instantiate normalizer lazily (used externally via `normalize_features`)
         if not hasattr(self, "_normalizer") or self._normalizer is None:
             self._normalizer = UniversalOnlineNormalizer(self)
 
-        # Add normalized variants for numeric features as `{key}_norm` (non-breaking)
+        self._prev_close = close
+        return feature_vector
+
+    def normalize_features(self, features: dict[str, float]) -> dict[str, float]:
+        """Return a normalized copy of `features` using this builder's normalizer.
+
+        This performs normalization at model input time and does not mutate the
+        original feature dict or add `_norm` keys into the pipeline. It matches
+        previous behavior by preferring numeric fields and leaving categorical
+        or availability flags untouched.
+        """
+        if features is None:
+            return {}
+
+        # ensure normalizer exists
+        if not hasattr(self, "_normalizer") or self._normalizer is None:
+            self._normalizer = UniversalOnlineNormalizer(self)
+
+        out: dict[str, float] = {}
         SKIP_KEYS = {
             "regime_label",
             "regime_state_bull",
@@ -892,52 +910,63 @@ class OnlineFeatureBuilder:
             "micro_best_ask_size",
         }
 
-        keys = list(feature_vector.keys())
-        for k in keys:
-            # skip already-normalized/raw keys and explicitly skipped keys
-            if k.endswith("_norm") or k.endswith("_raw") or k in SKIP_KEYS:
+        for k, v in features.items():
+            # leave explicit normalized/raw keys alone
+            if k.endswith("_norm") or k.endswith("_raw"):
+                out[k] = v
                 continue
-            if k.endswith("_available") or k.startswith("has_"):
+            # availability flags and categorical keys are copied unchanged
+            if k.endswith("_available") or k.startswith("has_") or k in SKIP_KEYS:
+                out[k] = v
                 continue
 
-            v = feature_vector.get(k)
+            # numeric normalization
             if isinstance(v, (int, float)) and (not isinstance(v, bool)):
                 try:
                     if not math.isfinite(float(v)):
-                        normed = 0.0
+                        out[k] = 0.0
                     else:
-                        normed = self._normalizer.transform(k, float(v))
+                        out[k] = self._normalizer.transform(k, float(v))
                 except Exception:
-                    normed = 0.0
-                # only add norm key if absent to avoid accidental overwrites
-                norm_key = f"{k}_norm"
-                if norm_key not in feature_vector:
-                    feature_vector[norm_key] = normed
+                    out[k] = 0.0
+            else:
+                out[k] = v
 
-        self._prev_close = close
-        return feature_vector
+        return out
+
+    def save_normalizer(self, path: str) -> None:
+        """Persist the current normalizer state to `path` (JSON).
+
+        If the normalizer does not exist yet this is a no-op.
+        """
+        if not hasattr(self, "_normalizer") or self._normalizer is None:
+            return
+        try:
+            self._normalizer.save(path)
+        except Exception:
+            # best-effort: re-raise to let calling code surface errors
+            raise
+
+    def load_normalizer(self, path: str) -> None:
+        """Load a saved normalizer state from `path` and bind it to this builder.
+
+        This will restore per-feature window snapshots so normalization resumes
+        with historical context.
+        """
+        try:
+            self._normalizer = UniversalOnlineNormalizer.load(self, path)
+            return
+        except Exception:
+            # fallback: attempt to load JSON and restore via from_dict
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    state = json.load(fh)
+            except Exception:
+                raise
+            # create and populate
+            self._normalizer = UniversalOnlineNormalizer(self, eps=float(state.get("eps", 1e-6)), window_map=state.get("window_map"))
+            self._normalizer.from_dict(state)
 
 
-def build_normalized_features(features: dict[str, float]) -> dict[str, float]:
-    """Return a feature dict where normalized variants are preferred when available.
 
-    For each key `k` in the original features, if `k_norm` exists use that value
-    instead of `k`. Keys that are categorical or explicitly raw are left untouched.
-    This keeps existing code working while models consume normalized inputs.
-    """
-    if features is None:
-        return {}
 
-    out: dict[str, float] = {}
-    for k, v in features.items():
-        # if this is a normalized key, copy as-is
-        if k.endswith("_norm"):
-            out[k] = v
-            continue
-        # prefer normalized variant when present
-        norm_key = f"{k}_norm"
-        if norm_key in features:
-            out[k] = features[norm_key]
-        else:
-            out[k] = v
-    return out

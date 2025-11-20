@@ -56,15 +56,11 @@ class SegmentSummary:
             "index": self.index,
             "trades": self.trades,
             "hit_rate": self.hit_rate,
-            "strat_return_log": self.strat_return,
-            "strat_return": math.expm1(self.strat_return),
-            "buy_hold_log": self.buy_hold,
-            "buy_hold": math.expm1(self.buy_hold),
+            "strat_return": self.strat_return,
+            "buy_hold": self.buy_hold,
             "sharpe": self.sharpe,
-            "costs_log": self.costs,
-            "costs": math.expm1(self.costs) - 1.0,
-            "pnl_log": self.pnl,
-            "pnl": math.expm1(self.pnl) - 1.0,
+            "costs": self.costs,
+            "pnl": self.pnl,
         }
 
 
@@ -86,9 +82,9 @@ class SweepResult:
     def to_row(self) -> str:
         knob_bits = ", ".join(f"{key}={self.overrides[key]}" for key in sorted(self.overrides)) or "defaults"
         return (
-            f"origin={self.origin}, knobs={{{knob_bits}}}, trades={self.trades}, "
-            f"hit={self.hit_rate:.2%}, strat={math.expm1(self.strat_return):.2%}, "
-            f"sharpe={self.sharpe:.2f}, costs={math.expm1(self.costs) - 1:.2%}"
+                f"origin={self.origin}, knobs={{{knob_bits}}}, trades={self.trades}, "
+            f"hit={self.hit_rate:.2%}, strat={self.strat_return:.2%}, "
+            f"sharpe={self.sharpe:.2f}, costs={self.costs:.2%}"
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -97,18 +93,14 @@ class SweepResult:
             "walk_forward": self.walk_forward,
             "params": self.params,
             "overrides": self.overrides,
-            "metrics": {
+                "metrics": {
                 "trades": self.trades,
                 "hit_rate": self.hit_rate,
-                "strat_return_log": self.strat_return,
-                "strat_return": math.expm1(self.strat_return),
-                "buy_hold_log": self.buy_hold,
-                "buy_hold": math.expm1(self.buy_hold),
+                "strat_return": self.strat_return,
+                "buy_hold": self.buy_hold,
                 "sharpe": self.sharpe,
-                "costs_log": self.costs,
-                "costs": math.expm1(self.costs) - 1.0,
-                "pnl_log": self.pnl,
-                "pnl": math.expm1(self.pnl) - 1.0,
+                "costs": self.costs,
+                "pnl": self.pnl,
             },
             "segments": [segment.to_dict() for segment in self.segments],
         }
@@ -191,8 +183,8 @@ def _warm_start_model(
             close = float(candle["close"])
 
             if previous_features is not None and previous_close is not None:
-                log_return = math.log(max(close, 1e-12) / max(previous_close, 1e-12))
-                target = log_return - trade_cost if cost_adjust_training else log_return
+                pct_return = (close / max(previous_close, 1e-12)) - 1.0
+                target = pct_return - trade_cost if cost_adjust_training else pct_return
                 raw_pred = model.predict_one(previous_features)
                 predicted_edge = float(raw_pred) if raw_pred is not None else 0.0
                 if calibrator is not None:
@@ -700,12 +692,9 @@ def write_outputs(results: Sequence[SweepResult], *, output_dir: Path) -> None:
                 "walk_forward",
                 "trades",
                 "hit_rate",
-                "strat_return_log",
                 "strat_return",
-                "buy_hold_log",
                 "buy_hold",
                 "sharpe",
-                "costs_log",
                 "costs",
                 *param_names,
             ]
@@ -717,12 +706,9 @@ def write_outputs(results: Sequence[SweepResult], *, output_dir: Path) -> None:
                 result.trades,
                 result.hit_rate,
                 result.strat_return,
-                math.expm1(result.strat_return),
                 result.buy_hold,
-                math.expm1(result.buy_hold),
                 result.sharpe,
                 result.costs,
-                math.expm1(result.costs) - 1.0,
             ]
             row.extend(result.params.get(name) for name in param_names)
             writer.writerow(row)

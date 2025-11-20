@@ -20,17 +20,17 @@ def reliability(
     ),
     bins: int = typer.Option(10, min=2, help="Number of quantile bins used for calibration."),
 ) -> None:
-    """Plot predicted vs realised log returns for each diagnostics file."""
+    """Plot predicted vs realised returns for each diagnostics file."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for csv_path in inputs:
         df = pd.read_csv(csv_path)
-        if {"predicted_edge", "realized_log_return"} - set(df.columns):
+        if {"predicted_edge", "realized_return"} - set(df.columns):
             typer.echo(f"Skipping {csv_path}: required columns missing.")
             continue
 
-        clean = df[["predicted_edge", "realized_log_return"]].dropna()
+        clean = df[["predicted_edge", "realized_return"]].dropna()
         if clean.empty:
             typer.echo(f"Skipping {csv_path}: no rows after dropping NaNs.")
             continue
@@ -43,7 +43,7 @@ def reliability(
 
         grouped = clean.groupby(labels).agg(
             predicted_mean=("predicted_edge", "mean"),
-            realized_mean=("realized_log_return", "mean"),
+            realized_mean=("realized_return", "mean"),
             count=("predicted_edge", "size"),
         )
         if grouped.empty:
@@ -56,8 +56,8 @@ def reliability(
         max_edge = grouped["predicted_mean"].max()
         ax.plot([min_edge, max_edge], [min_edge, max_edge], linestyle="--", color="gray", label="Ideal")
         ax.set_title(csv_path.name)
-        ax.set_xlabel("Predicted log return")
-        ax.set_ylabel("Realized log return")
+        ax.set_xlabel("Predicted return")
+        ax.set_ylabel("Realized return")
         ax.grid(True, alpha=0.3)
         ax.legend()
         for _, row in grouped.iterrows():

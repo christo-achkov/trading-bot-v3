@@ -42,7 +42,7 @@ def run(
     edge_threshold: float = typer.Option(
         0.001,
         min=0.0,
-        help="Minimum forecast log-return required (after costs) to open a position.",
+        help="Minimum forecast return required (after costs) to open a position.",
     ),
     pretrain_days: int = typer.Option(
         30,
@@ -58,15 +58,12 @@ def run(
         3.0,
         min=0.0,
         help="Per-trade slippage assumption in basis points.",
-    ),
-    edge_clip: Optional[float] = typer.Option(
-        None,
         min=0.0,
         help="Optional absolute cap applied to predicted edges before decision-making.",
     ),
     diagnostics_path: Optional[Path] = typer.Option(
         None,
-        help="Persist predicted vs realised log returns to CSV for calibration analysis.",
+        help="Persist predicted vs realised returns to CSV for calibration analysis.",
     ),
     trades_path: Optional[Path] = typer.Option(
         None,
@@ -185,7 +182,7 @@ def run(
     spread_cost_scale: float = typer.Option(
         0.0,
         min=0.0,
-        help="Scale applied to the spread feature when computing dynamic costs (in log-return units).",
+        help="Scale applied to the spread feature when computing dynamic costs (in return units).",
     ),
     volatility_cost_feature: str = typer.Option(
         "return_std_short",
@@ -337,6 +334,7 @@ def run(
                 prefer_enriched=True,
             )
 
+            edge_clip = None
             if total_samples > 0:
                 with _progress(total_samples) as progress:
                     task_id = progress.add_task("Backtest", total=total_samples)
@@ -422,10 +420,10 @@ def run(
         "sharpe={sh:.2f}, costs={costs:.2%}, metric={metric}".format(
             trades=result.trades,
             hit=result.hit_rate,
-            sr=math.expm1(result.total_return),
-            bh=math.expm1(result.buy_hold_return),
+            sr=result.total_return,
+            bh=result.buy_hold_return,
             sh=result.sharpe_ratio,
-            costs=-math.expm1(-result.total_costs),
+            costs=result.total_costs,
             metric=result.metric_summary,
         )
     )
@@ -433,7 +431,7 @@ def run(
     if diagnostics_path and diagnostics_buffer is not None:
         diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
         with diagnostics_path.open("w", encoding="utf-8") as handle:
-            handle.write("predicted_edge,realized_log_return\n")
+            handle.write("predicted_edge,realized_return\n")
             for predicted, realized in diagnostics_buffer:
                 handle.write(f"{predicted},{realized}\n")
 
@@ -445,7 +443,7 @@ def run(
                 "timestamp",
                 "side",
                 "predicted_edge",
-                "log_return",
+                "pct_return",
                 "gross_return",
                 "fees",
                 "net_return",
@@ -516,8 +514,8 @@ def _warm_start_model(
         close = float(candle["close"])
 
         if previous_features is not None and previous_close is not None:
-            log_return = math.log(max(close, 1e-12) / max(previous_close, 1e-12))
-            net_return = log_return - trade_cost if cost_adjust_training else log_return
+            pct_return = (close / max(previous_close, 1e-12)) - 1.0
+            net_return = pct_return - trade_cost if cost_adjust_training else pct_return
             predicted_edge_raw = model.predict_one(previous_features)
             predicted_edge = 0.0 if predicted_edge_raw is None else float(predicted_edge_raw)
             if calibrator is not None:

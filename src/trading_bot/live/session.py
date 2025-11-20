@@ -21,7 +21,7 @@ from trading_bot.data.binance_downloader import INTERVAL_TO_TIMDELTA
 from trading_bot.features import OnlineFeatureBuilder
 from trading_bot.models.regime import SupportsPredictLearn
 from trading_bot.utils import parse_iso8601
-from trading_bot.features.engineer import build_normalized_features
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ class LiveSignal:
     close_time: datetime | None
     prediction: float
     raw_prediction: float
-    realised_log_return: float | None
+    realised_return: float | None
     training_target: float | None
     features: dict[str, float]
     record: dict
@@ -61,6 +61,7 @@ class LiveMarketSession:
         cost_adjust_training: bool = False,
         logger: logging.Logger | None = None,
         recorder: ParquetRecorder | None = None,
+        normalizer_state_path: str | None = None,
     ) -> None:
         if interval not in INTERVAL_TO_TIMDELTA:
             raise ValueError(f"Unsupported interval: {interval}")
@@ -81,6 +82,7 @@ class LiveMarketSession:
         self._previous_features: dict[str, float] | None = None
         self._previous_close: float | None = None
         self._recorder = recorder
+        self._normalizer_state_path = normalizer_state_path
 
     async def run(self, callback: Callable[[LiveSignal], Awaitable[None] | None]) -> None:
         """Start streaming; invoke callback when a new signal is ready."""
@@ -112,6 +114,18 @@ class LiveMarketSession:
                 self._recorder.close()
 
     async def _warm_start(self) -> None:
+        # load normalizer state if provided before processing history
+        try:
+            if self._normalizer_state_path is not None:
+                try:
+                    self._builder.load_normalizer(self._normalizer_state_path)
+                except Exception as error:
+                    self._logger.warning("Failed to load normalizer state: %s", error)
+
+        except Exception:
+            # defensive: continue warm start even if load fails
+            pass
+
         candles = await asyncio.to_thread(self._fetch_history)
         if not candles:
             self._logger.warning("No historical candles returned during warm-up")
@@ -142,9 +156,9 @@ class LiveMarketSession:
                 close_price = float(record.get("close", 0.0))
 
                 if previous_features is not None and previous_close is not None:
-                    # prefer normalized inputs for model prediction/learning
+                    # prefer builder-level normalization when available (do not mutate features)
                     try:
-                        model_input_prev = build_normalized_features(previous_features) if previous_features is not None else {}
+                        model_input_prev = self._builder.normalize_features(previous_features) if previous_features is not None else {}
                     except Exception:
                         model_input_prev = previous_features
 
@@ -156,8 +170,9 @@ class LiveMarketSession:
                         if calibrated is not None:
                             prediction = float(calibrated)
 
-                    log_return = self._log_return(previous_close, close_price)
-                    target = log_return
+                    # use simple percent return
+                    pct_return = self._pct_return(previous_close, close_price)
+                    target = pct_return
 
                     try:
                         self._model.learn_one(model_input_prev, target)
@@ -192,12 +207,12 @@ class LiveMarketSession:
         close_price = float(record.get("close", 0.0))
         event_time = self._extract_event_time(record)
 
-        realised_log_return: float | None = None
+        realised_return: float | None = None
         training_target: float | None = None
 
         if self._previous_features is not None and self._previous_close is not None:
             try:
-                model_input_prev = build_normalized_features(self._previous_features) if self._previous_features is not None else {}
+                model_input_prev = self._builder.normalize_features(self._previous_features) if self._previous_features is not None else {}
             except Exception:
                 model_input_prev = self._previous_features
 
@@ -209,12 +224,12 @@ class LiveMarketSession:
                 if calibrated_prev is not None:
                     raw_prev_value = float(calibrated_prev)
 
-            realised_log_return = self._log_return(self._previous_close, close_price)
+            realised_return = self._pct_return(self._previous_close, close_price)
 
-            # use realised log return internally for online learning (optionally adjust for cost),
+            # use realised return internally for online learning (optionally adjust for cost),
             # but do not expose this as the public training_target on the signal. The CLI
             # computes a display/ledger target from the model prediction and current position.
-            learn_target = realised_log_return - self._trade_cost if self._cost_adjust else realised_log_return
+            learn_target = realised_return - self._trade_cost if self._cost_adjust else realised_return
             try:
                 self._model.learn_one(model_input_prev, learn_target)
             except Exception:
@@ -223,7 +238,7 @@ class LiveMarketSession:
                 self._calibrator.learn_one(calibrator_input_prev, learn_target)
 
         try:
-            model_input_next = build_normalized_features(features)
+            model_input_next = self._builder.normalize_features(features)
         except Exception:
             model_input_next = features
 
@@ -245,7 +260,7 @@ class LiveMarketSession:
             close_time=record.get("close_time"),
             prediction=prediction_value,
             raw_prediction=raw_prediction_value,
-            realised_log_return=realised_log_return,
+            realised_return=realised_return,
             training_target=None,
             features=features,
             record=record,
@@ -283,8 +298,8 @@ class LiveMarketSession:
         return input_payload
 
     @staticmethod
-    def _log_return(previous_close: float, current_close: float) -> float:
-        return math.log(max(current_close, 1e-12) / max(previous_close, 1e-12))
+    def _pct_return(previous_close: float, current_close: float) -> float:
+        return (current_close / max(previous_close, 1e-12)) - 1.0
 
     @staticmethod
     def _extract_event_time(record: dict) -> datetime:

@@ -42,8 +42,8 @@ class LiveSettings(BaseModel):
     display_symbol: str = Field("BTC/USDC:USDC")
     depth_levels: int = Field(50, ge=1)
     candle_history: int = Field(2_000, ge=10, description="Number of candles to retain in memory")
-    entry_edge: float = Field(0.0005, ge=0.0, description="Log-return edge required to enter a position")
-    exit_edge: float = Field(0.0002, ge=0.0, description="Log-return edge threshold to flatten a position")
+    entry_edge: float = Field(0.0005, ge=0.0, description="Return edge required to enter a position")
+    exit_edge: float = Field(0.0002, ge=0.0, description="Return edge threshold to flatten a position")
     position_size: float = Field(0.001, ge=0.0, description="Base asset position size for each trade")
     cooldown_seconds: float = Field(2.0, ge=0.0, description="Minimum seconds between consecutive orders")
 

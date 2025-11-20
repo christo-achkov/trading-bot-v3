@@ -15,7 +15,7 @@ def iter_supervised_samples(
 ) -> Iterator[Tuple[Dict[str, float], int]]:
     """Yield `(features, label)` tuples from a candle iterator.
 
-    The label encodes the direction of the next log return:
+    The label encodes the direction of the next return:
       * `1` when the next return exceeds ``label_threshold``
       * `-1` when the next return is below ``-label_threshold``
       * `0` otherwise

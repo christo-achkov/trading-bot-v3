@@ -10,7 +10,7 @@ from loguru import logger
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from river import metrics as river_metrics
     from trading_bot.features.engineer import OnlineFeatureBuilder
-    from trading_bot.features.engineer import build_normalized_features
+    
 
 
 class OnlineModel(Protocol):
@@ -125,11 +125,11 @@ class BacktestEngine:
                 first_close = close
 
             if previous_features is not None and previous_close is not None:
-                # prefer normalized inputs when available
+                # prefer builder-level normalization when possible (do not mutate features)
+                model_input = previous_features
                 try:
-                    from trading_bot.features.engineer import build_normalized_features
-
-                    model_input = build_normalized_features(previous_features) if previous_features is not None else {}
+                    if builder is not None and hasattr(builder, "normalize_features"):
+                        model_input = builder.normalize_features(previous_features) if previous_features is not None else {}
                 except Exception:
                     model_input = previous_features
 
@@ -151,7 +151,8 @@ class BacktestEngine:
                 if edge_clip is not None and edge_clip > 0.0:
                     predicted_edge = max(min(predicted_edge, edge_clip), -edge_clip)
 
-                log_return = self._log_return(previous_close, close)
+                # use simple percent return (not log-return)
+                pct_return = self._pct_return(previous_close, close)
 
                 cost_estimate = static_trade_cost
                 if (
@@ -175,10 +176,10 @@ class BacktestEngine:
 
                 if cost_adjust_training and turnover_change > 0:
                     cost_basis = cost_estimate
-                    raw_training_target = log_return - cost_basis
+                    raw_training_target = pct_return - cost_basis
                 else:
                     cost_basis = cost_estimate
-                    raw_training_target = log_return
+                    raw_training_target = pct_return
 
                 long_cushion = long_threshold_value - math.log(1 - cost_estimate) if cost_estimate < 1 else long_threshold_value - math.log(1e-10)
                 short_cushion = short_threshold_value - math.log(1 - cost_estimate) if cost_estimate < 1 else short_threshold_value - math.log(1e-10)
@@ -255,9 +256,9 @@ class BacktestEngine:
 
                 executed = position != 0.0
                 cost_penalty = cost_estimate * abs(position) if executed else 0.0
-                cost_penalty_log = abs(position) * math.log(1 - cost_estimate) if executed and cost_estimate < 1 else 0.0
-                gross_return = position * log_return
-                strategy_return = gross_return + cost_penalty_log
+                gross_return = position * pct_return
+                # subtract linear cost penalty from strategy return (percent-space)
+                strategy_return = gross_return - cost_penalty
 
                 turnover_change = abs(position - current_position)
                 penalty = turnover_penalty * turnover_change if turnover_penalty > 0.0 else 0.0
@@ -303,9 +304,9 @@ class BacktestEngine:
                                 "timestamp": timestamp_str,
                                 "side": "long" if position > 0 else "short",
                                 "predicted_edge": predicted_edge,
-                                "log_return": log_return,
+                                "pct_return": pct_return,
                                 "gross_return": gross_return,
-                                "fees": cost_penalty_log,
+                                "fees": cost_penalty,
                                 "net_return": strategy_return,
                                 "equity_after": equity,
                                 "position_size": position,
@@ -376,7 +377,7 @@ class BacktestEngine:
 
         buy_hold_return = 0.0
         if first_close is not None and last_close is not None and first_close > 0:
-            buy_hold_return = self._log_return(first_close, last_close)
+            buy_hold_return = self._pct_return(first_close, last_close)
 
         sharpe_ratio = 0.0
         if returns_count > 1:
@@ -520,5 +521,5 @@ class BacktestEngine:
         return position
 
     @staticmethod
-    def _log_return(previous_close: float, current_close: float) -> float:
-        return math.log(max(current_close, 1e-12) / max(previous_close, 1e-12))
+    def _pct_return(previous_close: float, current_close: float) -> float:
+        return (current_close / max(previous_close, 1e-12)) - 1.0
