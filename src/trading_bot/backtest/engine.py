@@ -10,6 +10,7 @@ from loguru import logger
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from river import metrics as river_metrics
     from trading_bot.features.engineer import OnlineFeatureBuilder
+    from trading_bot.features.engineer import build_normalized_features
 
 
 class OnlineModel(Protocol):
@@ -124,7 +125,15 @@ class BacktestEngine:
                 first_close = close
 
             if previous_features is not None and previous_close is not None:
-                predicted_edge_raw = self._model.predict_one(previous_features)
+                # prefer normalized inputs when available
+                try:
+                    from trading_bot.features.engineer import build_normalized_features
+
+                    model_input = build_normalized_features(previous_features) if previous_features is not None else {}
+                except Exception:
+                    model_input = previous_features
+
+                predicted_edge_raw = self._model.predict_one(model_input)
                 predicted_edge = float(predicted_edge_raw) if predicted_edge_raw is not None else 0.0
 
                 calibrator_features: dict[str, float] | None = None
@@ -164,7 +173,7 @@ class BacktestEngine:
                         cap_value=dynamic_cost_cap,
                     )
 
-                if cost_adjust_training:
+                if cost_adjust_training and turnover_change > 0:
                     cost_basis = cost_estimate
                     raw_training_target = log_return - cost_basis
                 else:
@@ -348,7 +357,11 @@ class BacktestEngine:
                 if step_callback is not None:
                     step_callback()
 
-                self._model.learn_one(previous_features, learning_target)
+                try:
+                    self._model.learn_one(model_input, learning_target)
+                except Exception:
+                    # fallback to raw features if something unexpected happens
+                    self._model.learn_one(previous_features, learning_target)
                 if self._calibrator is not None and calibrator_features is not None:
                     self._calibrator.learn_one(calibrator_features, learning_target)
 

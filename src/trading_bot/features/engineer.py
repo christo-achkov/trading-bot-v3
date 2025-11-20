@@ -1,10 +1,11 @@
 """Feature engineering utilities operating on streaming candle data."""
 from __future__ import annotations
 
+import json
 import math
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, Sequence
+from typing import Deque, Dict, Sequence, Optional
 
 try:  # pragma: no cover - optional dependency
     from river import cluster as river_cluster
@@ -124,6 +125,139 @@ class StreamingRSI:
         return 100.0 - (100.0 / (1.0 + rs))
 
 
+class UniversalOnlineNormalizer:
+    """One-pass robust normalizer for streaming numeric features.
+
+    Algorithm:
+    - signed log-magnitude: s = sign(x) * log1p(abs(x))
+    - center = rolling median(window)
+    - scale = 1.4826 * MAD(window) (MAD -> robust std)
+    - standardized = (s - center) / max(scale, eps)
+    - output = tanh(standardized)  -> bounded in (-1,1)
+
+    Uses builder's deques for windows (price -> _close_history, volume/depth -> _volume_history,
+    funding -> _funding_history). No external knobs required.
+    """
+
+    def __init__(
+        self,
+        builder: "OnlineFeatureBuilder",
+        *,
+        eps: float = 1e-6,
+        window_map: Optional[Dict[str, int]] = None,
+    ) -> None:
+        self._builder = builder
+        self._eps = float(eps)
+        # window_map: exact feature name or substring -> desired window size (int)
+        self._window_map: Dict[str, int] = dict(window_map) if window_map else {}
+
+    @staticmethod
+    def _median(arr: Sequence[float]) -> float:
+        if not arr:
+            return 0.0
+        a = sorted(arr)
+        n = len(a)
+        mid = n // 2
+        if n % 2 == 1:
+            return a[mid]
+        return 0.5 * (a[mid - 1] + a[mid])
+
+    @staticmethod
+    def _mad(arr: Sequence[float], center: float) -> float:
+        if not arr:
+            return 0.0
+        diffs = [abs(x - center) for x in arr]
+        return UniversalOnlineNormalizer._median(diffs)
+
+    def _select_window(self, name: str) -> Deque[float]:
+        n = name.lower()
+        if "fund" in n or "funding" in n:
+            return self._builder._funding_history
+        if any(k in n for k in ("volume", "depth", "liquidity", "bid", "ask", "size")):
+            return self._builder._volume_history
+        return self._builder._close_history
+
+    def _window_for_feature(self, name: str, base_window: Sequence[float]) -> Sequence[float]:
+        # exact name override
+        if name in self._window_map:
+            desired = int(self._window_map[name])
+            if desired <= 0:
+                return base_window
+            return list(base_window)[-desired:] if len(base_window) > desired else list(base_window)
+        # substring match overrides (first match)
+        for pattern, desired in self._window_map.items():
+            if pattern in name and isinstance(desired, int) and desired > 0:
+                return list(base_window)[-desired:] if len(base_window) > desired else list(base_window)
+        # default: use entire base window
+        return list(base_window)
+
+    def transform(self, name: str, value: float) -> float:
+        try:
+            x = float(value)
+        except Exception:
+            return 0.0
+
+        if not math.isfinite(x):
+            return 0.0
+
+        signed_log = math.copysign(math.log1p(abs(x)), x)
+
+        base_window = list(self._select_window(name))
+        window = self._window_for_feature(name, base_window)
+        center = self._median(window) if window else 0.0
+        mad = self._mad(window, center) if window else 0.0
+        scale = 1.4826 * mad
+        # robust floor: use configured eps to avoid huge rescaling when MAD == 0
+        scale = max(scale, self._eps)
+
+        standardized = (signed_log - center) / scale
+        bounded = math.tanh(standardized)
+        return float(bounded)
+
+    def to_dict(self) -> Dict[str, object]:
+        """Serialize normalizer state and a snapshot of builder windows."""
+        return {
+            "eps": self._eps,
+            "window_map": self._window_map,
+            "close_history": list(self._builder._close_history),
+            "volume_history": list(self._builder._volume_history),
+            "funding_history": list(self._builder._funding_history),
+        }
+
+    def from_dict(self, state: Dict[str, object]) -> None:
+        """Restore normalizer config and populate builder histories from a saved state."""
+        self._eps = float(state.get("eps", self._eps))
+        wm = state.get("window_map")
+        if isinstance(wm, dict):
+            self._window_map = {str(k): int(v) for k, v in wm.items()}
+        # restore builder deques (replace contents)
+        for key in ("close_history", "volume_history", "funding_history"):
+            items = state.get(key)
+            if isinstance(items, list):
+                target = getattr(self._builder, f"_{key}", None)
+                if isinstance(target, deque):
+                    target.clear()
+                    for it in items:
+                        try:
+                            target.append(float(it))
+                        except Exception:
+                            continue
+
+    def save(self, path: str) -> None:
+        """Save state to JSON file."""
+        data = self.to_dict()
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def load(cls, builder: "OnlineFeatureBuilder", path: str) -> "UniversalOnlineNormalizer":
+        """Create a normalizer bound to `builder` and restore state from file."""
+        with open(path, "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+        norm = cls(builder, eps=float(state.get("eps", 1e-6)), window_map=state.get("window_map"))
+        norm.from_dict(state)
+        return norm
+
 @dataclass
 class OnlineFeatureBuilder:
     """Construct derived features incrementally from streaming candles."""
@@ -179,6 +313,16 @@ class OnlineFeatureBuilder:
         high = float(candle.get("high", close))
         low = float(candle.get("low", close))
         volume = float(candle.get("volume", 0.0))
+
+        # update history deques used by the normalizer
+        try:
+            self._close_history.append(close)
+        except Exception:
+            pass
+        try:
+            self._volume_history.append(volume)
+        except Exception:
+            pass
 
         best_bid = candle.get("best_bid", candle.get("bid_price", candle.get("bid", close)))
         best_ask = candle.get("best_ask", candle.get("ask_price", candle.get("ask", close)))
@@ -731,5 +875,69 @@ class OnlineFeatureBuilder:
             "funding_rate_basis_diff_mean": funding_basis_diff_mean,
         }
 
+        # instantiate normalizer lazily
+        if not hasattr(self, "_normalizer") or self._normalizer is None:
+            self._normalizer = UniversalOnlineNormalizer(self)
+
+        # Add normalized variants for numeric features as `{key}_norm` (non-breaking)
+        SKIP_KEYS = {
+            "regime_label",
+            "regime_state_bull",
+            "regime_state_bear",
+            "regime_state_sideways",
+            "micro_mid_price",
+            "micro_best_bid",
+            "micro_best_ask",
+            "micro_best_bid_size",
+            "micro_best_ask_size",
+        }
+
+        keys = list(feature_vector.keys())
+        for k in keys:
+            # skip already-normalized/raw keys and explicitly skipped keys
+            if k.endswith("_norm") or k.endswith("_raw") or k in SKIP_KEYS:
+                continue
+            if k.endswith("_available") or k.startswith("has_"):
+                continue
+
+            v = feature_vector.get(k)
+            if isinstance(v, (int, float)) and (not isinstance(v, bool)):
+                try:
+                    if not math.isfinite(float(v)):
+                        normed = 0.0
+                    else:
+                        normed = self._normalizer.transform(k, float(v))
+                except Exception:
+                    normed = 0.0
+                # only add norm key if absent to avoid accidental overwrites
+                norm_key = f"{k}_norm"
+                if norm_key not in feature_vector:
+                    feature_vector[norm_key] = normed
+
         self._prev_close = close
         return feature_vector
+
+
+def build_normalized_features(features: dict[str, float]) -> dict[str, float]:
+    """Return a feature dict where normalized variants are preferred when available.
+
+    For each key `k` in the original features, if `k_norm` exists use that value
+    instead of `k`. Keys that are categorical or explicitly raw are left untouched.
+    This keeps existing code working while models consume normalized inputs.
+    """
+    if features is None:
+        return {}
+
+    out: dict[str, float] = {}
+    for k, v in features.items():
+        # if this is a normalized key, copy as-is
+        if k.endswith("_norm"):
+            out[k] = v
+            continue
+        # prefer normalized variant when present
+        norm_key = f"{k}_norm"
+        if norm_key in features:
+            out[k] = features[norm_key]
+        else:
+            out[k] = v
+    return out

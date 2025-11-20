@@ -21,6 +21,7 @@ from trading_bot.data.binance_downloader import INTERVAL_TO_TIMDELTA
 from trading_bot.features import OnlineFeatureBuilder
 from trading_bot.models.regime import SupportsPredictLearn
 from trading_bot.utils import parse_iso8601
+from trading_bot.features.engineer import build_normalized_features
 
 LOGGER = logging.getLogger(__name__)
 
@@ -141,7 +142,13 @@ class LiveMarketSession:
                 close_price = float(record.get("close", 0.0))
 
                 if previous_features is not None and previous_close is not None:
-                    prediction_raw = self._model.predict_one(previous_features)
+                    # prefer normalized inputs for model prediction/learning
+                    try:
+                        model_input_prev = build_normalized_features(previous_features) if previous_features is not None else {}
+                    except Exception:
+                        model_input_prev = previous_features
+
+                    prediction_raw = self._model.predict_one(model_input_prev)
                     prediction = float(prediction_raw) if prediction_raw is not None else 0.0
                     calibrator_input = self._build_calibrator_input(previous_features, prediction)
                     if self._calibrator is not None:
@@ -150,9 +157,12 @@ class LiveMarketSession:
                             prediction = float(calibrated)
 
                     log_return = self._log_return(previous_close, close_price)
-                    target = log_return - self._trade_cost if self._cost_adjust else log_return
+                    target = log_return
 
-                    self._model.learn_one(previous_features, target)
+                    try:
+                        self._model.learn_one(model_input_prev, target)
+                    except Exception:
+                        self._model.learn_one(previous_features, target)
                     if self._calibrator is not None:
                         self._calibrator.learn_one(calibrator_input, target)
 
@@ -186,7 +196,12 @@ class LiveMarketSession:
         training_target: float | None = None
 
         if self._previous_features is not None and self._previous_close is not None:
-            raw_prev = self._model.predict_one(self._previous_features)
+            try:
+                model_input_prev = build_normalized_features(self._previous_features) if self._previous_features is not None else {}
+            except Exception:
+                model_input_prev = self._previous_features
+
+            raw_prev = self._model.predict_one(model_input_prev)
             raw_prev_value = float(raw_prev) if raw_prev is not None else 0.0
             calibrator_input_prev = self._build_calibrator_input(self._previous_features, raw_prev_value)
             if self._calibrator is not None:
@@ -195,13 +210,24 @@ class LiveMarketSession:
                     raw_prev_value = float(calibrated_prev)
 
             realised_log_return = self._log_return(self._previous_close, close_price)
-            training_target = realised_log_return - self._trade_cost if self._cost_adjust else realised_log_return
 
-            self._model.learn_one(self._previous_features, training_target)
+            # use realised log return internally for online learning (optionally adjust for cost),
+            # but do not expose this as the public training_target on the signal. The CLI
+            # computes a display/ledger target from the model prediction and current position.
+            learn_target = realised_log_return - self._trade_cost if self._cost_adjust else realised_log_return
+            try:
+                self._model.learn_one(model_input_prev, learn_target)
+            except Exception:
+                self._model.learn_one(self._previous_features, learn_target)
             if self._calibrator is not None:
-                self._calibrator.learn_one(calibrator_input_prev, training_target)
+                self._calibrator.learn_one(calibrator_input_prev, learn_target)
 
-        raw_prediction = self._model.predict_one(features)
+        try:
+            model_input_next = build_normalized_features(features)
+        except Exception:
+            model_input_next = features
+
+        raw_prediction = self._model.predict_one(model_input_next)
         raw_prediction_value = float(raw_prediction) if raw_prediction is not None else 0.0
         calibrator_input_next = self._build_calibrator_input(features, raw_prediction_value)
         prediction_value = raw_prediction_value
@@ -220,7 +246,7 @@ class LiveMarketSession:
             prediction=prediction_value,
             raw_prediction=raw_prediction_value,
             realised_log_return=realised_log_return,
-            training_target=training_target,
+            training_target=None,
             features=features,
             record=record,
         )
@@ -244,10 +270,7 @@ class LiveMarketSession:
         if not fetched:
             return []
 
-        if self._candle_history > 0:
-            return fetched[-self._candle_history :]
-        else:
-            return []
+        return fetched[-self._candle_history :] if self._candle_history > 0 else []
 
     def _build_calibrator_input(self, features: dict[str, float], prediction: float) -> dict[str, float]:
         input_payload = {"prediction": prediction}
