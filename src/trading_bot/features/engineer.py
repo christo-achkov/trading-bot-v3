@@ -128,6 +128,8 @@ class StreamingRSI:
 class OnlineFeatureBuilder:
     """Construct derived features incrementally from streaming candles."""
 
+    exclude_microstructure: bool = False
+
     return_fast: RollingMean = field(default_factory=lambda: RollingMean(5))
     return_medium: RollingMean = field(default_factory=lambda: RollingMean(30))
     return_slow: RollingMean = field(default_factory=lambda: RollingMean(120))
@@ -481,8 +483,36 @@ class OnlineFeatureBuilder:
         if return_std_short > 1e-12:
             spread_vol_ratio = spread_pct / return_std_short
 
-        self._close_history.append(close)
-        self._volume_history.append(volume)
+        if self.exclude_microstructure:
+            mid_price = close
+            best_bid = close
+            best_ask = close
+            best_bid_size = 0.0
+            best_ask_size = 0.0
+            spread_abs = 0.0
+            spread_bps = 0.0
+            spread_vol_ratio = 0.0
+            has_spread = 0.0
+            imbalance_top = 0.0
+            liquidity_imbalance_25 = 0.0
+            liquidity_imbalance_50 = 0.0
+            liquidity_imbalance_100 = 0.0
+            liquidity_density_25 = 0.0
+            liquidity_density_50 = 0.0
+            liquidity_density_100 = 0.0
+            liquidity_pressure = 0.0
+            liquidity_tier_ratio_50_25 = 0.0
+            liquidity_tier_ratio_100_25 = 0.0
+            liquidity_tier_ratio_100_50 = 0.0
+            bid_depth_25 = 0.0
+            ask_depth_25 = 0.0
+            bid_depth_50 = 0.0
+            ask_depth_50 = 0.0
+            bid_depth_100 = 0.0
+            ask_depth_100 = 0.0
+            has_depth_25 = 0.0
+            has_depth_50 = 0.0
+            has_depth_100 = 0.0
 
         close_history = list(self._close_history)
         volume_history = list(self._volume_history)

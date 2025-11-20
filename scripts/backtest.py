@@ -40,12 +40,12 @@ def run(
     start: Optional[str] = typer.Option(None, help="Filter start timestamp (ISO8601)."),
     end: Optional[str] = typer.Option(None, help="Filter end timestamp (ISO8601)."),
     edge_threshold: float = typer.Option(
-        0.0005,
+        0.001,
         min=0.0,
         help="Minimum forecast log-return required (after costs) to open a position.",
     ),
     pretrain_days: int = typer.Option(
-        7,
+        30,
         min=0,
         help="Days of history before the start window used for warm-up training.",
     ),
@@ -298,7 +298,7 @@ def run(
             )
             metric = default_metrics()
             engine = BacktestEngine(model, calibrator=calibrator)
-            builder = OnlineFeatureBuilder()
+            builder = OnlineFeatureBuilder(exclude_microstructure=True)
 
             if pretrain_candles:
                 if pretrain_cache_count > 0:
