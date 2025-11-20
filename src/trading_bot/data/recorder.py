@@ -61,6 +61,43 @@ class ParquetRecorder:
         self._flush()
         self._seen_keys.clear()
 
+    def read_recent(self, *, limit: int = 2000) -> list[dict[str, Any]]:
+        """Read recent persisted records for this symbol/interval.
+
+        Returns records sorted by timestamp ascending. This is a best-effort reader
+        intended for warm-starting live sessions; it does not consult remote REST.
+        """
+        out: list[dict[str, Any]] = []
+        # Walk the directory for the symbol/interval and read parquet files.
+        symbol_dir = self._root / f"symbol={self._symbol}" / f"interval={self._interval}"
+        if not symbol_dir.exists():
+            return []
+
+        # Collect parquet files under the symbol/interval tree
+        files = list(symbol_dir.rglob("*.parquet"))
+        # Read newest first until we've gathered enough
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in files:
+            try:
+                table = pq.read_table(path)
+                records = table.to_pylist()
+                out.extend(records)
+                if len(out) >= limit:
+                    break
+            except Exception:
+                # skip corrupt/unreadable files
+                continue
+
+        if not out:
+            return []
+
+        # ensure ascending time order
+        def _ts_key(rec: dict[str, Any]):
+            return rec.get("close_time") or rec.get("event_time") or rec.get("open_time")
+
+        out.sort(key=_ts_key)
+        return out[-limit:]
+
     # Internal helpers -------------------------------------------------
 
     def _flush(self) -> None:

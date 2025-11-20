@@ -150,12 +150,75 @@ class LiveMarketSession:
             progress.start()
             task_id = progress.add_task("Pretraining", total=total_steps)
 
+        # Merge records and impute small gaps so features remain continuous.
+        merged: list[dict] = []
+        prev_rec: dict | None = None
+        total_imputed = 0
+        gap_events = 0
+        max_gap = 0
+        for rec in candles:
+            if prev_rec is None:
+                merged.append(rec)
+                prev_rec = rec
+                continue
+
+            # determine timestamp fields (prefer close_time/event_time/open_time)
+            def _ts_of(r: dict):
+                for k in ("close_time", "event_time", "open_time"):
+                    v = r.get(k)
+                    if v is not None:
+                        return v
+                return None
+
+            prev_ts = _ts_of(prev_rec)
+            cur_ts = _ts_of(rec)
+            # if timestamps are not datetimes, skip imputation
+            if isinstance(prev_ts, datetime) and isinstance(cur_ts, datetime):
+                expected = prev_ts + self._interval_delta
+                # insert imputed candles for short gaps only (<= 3 intervals)
+                gap_count = 0
+                while expected < cur_ts and gap_count < 3:
+                    imputed = dict(prev_rec)
+                    imputed["open_time"] = expected
+                    imputed["close_time"] = expected
+                    imputed["event_time"] = expected
+                    # use previous close for price fields
+                    prev_close = float(prev_rec.get("close", 0.0))
+                    imputed["open"] = prev_close
+                    imputed["high"] = prev_close
+                    imputed["low"] = prev_close
+                    imputed["close"] = prev_close
+                    imputed["volume"] = 0.0
+                    imputed["_imputed"] = True
+                    merged.append(imputed)
+                    gap_count += 1
+                    total_imputed += 1
+                    expected = expected + self._interval_delta
+                if gap_count > 0:
+                    gap_events += 1
+                    max_gap = max(max_gap, gap_count)
+                    try:
+                        self._logger.info(
+                            "Detected gap of %d intervals between %s and %s; imputed %d candles",
+                            gap_count,
+                            prev_ts.isoformat(),
+                            cur_ts.isoformat(),
+                            gap_count,
+                        )
+                    except Exception:
+                        self._logger.info("Detected gap and imputed %d candles", gap_count)
+                merged.append(rec)
+            else:
+                merged.append(rec)
+            prev_rec = rec
+
         try:
-            for record in candles:
-                features = self._builder.process(record)
+            for record in merged:
+                is_imputed = bool(record.get("_imputed"))
+                features = self._builder.process(record, imputed=is_imputed)
                 close_price = float(record.get("close", 0.0))
 
-                if previous_features is not None and previous_close is not None:
+                if previous_features is not None and previous_close is not None and not is_imputed:
                     # prefer builder-level normalization when available (do not mutate features)
                     try:
                         model_input_prev = self._builder.normalize_features(previous_features) if previous_features is not None else {}
@@ -189,7 +252,13 @@ class LiveMarketSession:
         finally:
             if progress is not None:
                 progress.stop()
-
+        if total_imputed:
+            self._logger.info(
+                "Warm-start imputed %d total candles across %d gap events (largest=%d)",
+                total_imputed,
+                gap_events,
+                max_gap,
+            )
         self._previous_features = previous_features
         self._previous_close = previous_close
 
@@ -267,25 +336,23 @@ class LiveMarketSession:
         )
 
     def _fetch_history(self) -> List[dict]:
-        end_time = datetime.now(timezone.utc)
-        total_span = self._interval_delta * max(self._candle_history + 5, 5)
-        start_time = end_time - total_span
-
-        fetched: List[dict] = []
-        for candle in fetch_candles_iter(
-            self._rest_client,
-            symbol=self._symbol,
-            interval=self._interval,
-            start=start_time,
-            end=end_time,
-            chunk_minutes=self._fetch_chunk_minutes,
-        ):
-            fetched.append(candle)
-
-        if not fetched:
+        # For live sessions we must only warm-start from recorded enriched data
+        # (Parquet). Do not fetch historical candles via REST during live.
+        if self._recorder is None:
+            self._logger.warning("No Parquet recorder available; skipping warm-start history")
             return []
 
-        return fetched[-self._candle_history :] if self._candle_history > 0 else []
+        try:
+            records = self._recorder.read_recent(limit=max(self._candle_history, 0) + 10)
+        except Exception as error:
+            self._logger.warning("Failed to read historical records from Parquet: %s", error)
+            return []
+
+        if not records:
+            self._logger.warning("No recorded historical candles available for warm-start")
+            return []
+
+        return records[-self._candle_history :] if self._candle_history > 0 else []
 
     def _build_calibrator_input(self, features: dict[str, float], prediction: float) -> dict[str, float]:
         input_payload = {"prediction": prediction}

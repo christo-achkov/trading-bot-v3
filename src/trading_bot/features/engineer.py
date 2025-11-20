@@ -306,23 +306,30 @@ class OnlineFeatureBuilder:
     _prev_return_std_medium: float | None = None
     _regime_stats: Dict[int, Dict[str, float]] = field(default_factory=dict)
 
-    def process(self, candle: Dict[str, float]) -> Dict[str, float]:
-        """Update internal state and return the latest feature vector."""
+    def process(self, candle: Dict[str, float], *, imputed: bool = False) -> Dict[str, float]:
+        """Update internal state and return the latest feature vector.
+
+        If `imputed` is True the builder will avoid updating the internal
+        histories used by the normalizer (so synthetic rows do not affect
+        normalization state). Other feature trackers will still be updated
+        to preserve continuity of time-dependent features.
+        """
 
         close = float(candle["close"])
         high = float(candle.get("high", close))
         low = float(candle.get("low", close))
         volume = float(candle.get("volume", 0.0))
 
-        # update history deques used by the normalizer
-        try:
-            self._close_history.append(close)
-        except Exception:
-            pass
-        try:
-            self._volume_history.append(volume)
-        except Exception:
-            pass
+        # update history deques used by the normalizer (skip for imputed rows)
+        if not imputed:
+            try:
+                self._close_history.append(close)
+            except Exception:
+                pass
+            try:
+                self._volume_history.append(volume)
+            except Exception:
+                pass
 
         best_bid = candle.get("best_bid", candle.get("bid_price", candle.get("bid", close)))
         best_ask = candle.get("best_ask", candle.get("ask_price", candle.get("ask", close)))
