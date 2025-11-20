@@ -10,7 +10,11 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+import logging
+
 from trading_bot.utils import parse_iso8601
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ParquetRecorder:
@@ -75,8 +79,13 @@ class ParquetRecorder:
 
         # Collect parquet files under the symbol/interval tree
         files = list(symbol_dir.rglob("*.parquet"))
+        if not files:
+            _LOGGER.debug("ParquetRecorder.read_recent: no parquet files under %s", symbol_dir)
+            return []
+
         # Read newest first until we've gathered enough
         files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        _LOGGER.debug("ParquetRecorder.read_recent: found %d parquet files under %s", len(files), symbol_dir)
         for path in files:
             try:
                 table = pq.read_table(path)
@@ -84,9 +93,26 @@ class ParquetRecorder:
                 out.extend(records)
                 if len(out) >= limit:
                     break
-            except Exception:
-                # skip corrupt/unreadable files
-                continue
+            except Exception as exc:
+                _LOGGER.warning("ParquetRecorder.read_recent: failed to read %s: %s", path, exc)
+                # Try a fallback: read all columns except 'symbol' which sometimes has
+                # mixed types across files (string vs nested dictionary). Dropping it
+                # preserves timestamps/prices for warm-start.
+                try:
+                    pf = pq.ParquetFile(path)
+                    names = list(pf.schema.names)
+                    cols = [n for n in names if n != "symbol"]
+                    if not cols:
+                        continue
+                    table = pf.read(columns=cols)
+                    records = table.to_pylist()
+                    # ensure records don't include 'symbol'
+                    out.extend(records)
+                    if len(out) >= limit:
+                        break
+                except Exception as exc2:
+                    _LOGGER.warning("ParquetRecorder.read_recent: fallback read failed %s: %s", path, exc2)
+                    continue
 
         if not out:
             return []
